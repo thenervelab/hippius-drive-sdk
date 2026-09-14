@@ -12,6 +12,7 @@ break on a deploy it had nothing to do with.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
@@ -38,6 +39,59 @@ class _Wire(BaseModel):
     """Base for every wire model: tolerate unknown fields, keep byte semantics."""
 
     model_config = ConfigDict(extra="ignore")
+
+
+@dataclass(frozen=True)
+class BrowseOptions:
+    """Non-paging options for ``/browse``.
+
+    Grouped rather than spread across the call so both the request builder and
+    the client method stay within the argument budget, and so a caller can
+    build one options object and page it.
+
+    Attributes:
+        path: Directory relative to the folder root; "" is the root.
+        sort_by: ``file_name``, ``size_bytes``, ``created_at``, ``updated_at``,
+            ``extension``, or ``uploaded_by``. Reorders files only.
+        sort_order: ``asc`` or ``desc``; consulted only when ``sort_by`` is set.
+        file_type: Categories and explicit extensions; a file matches any of
+            them. Setting it empties ``folders``.
+        uploaded_by: Exact uploader match. Setting it empties ``folders``.
+    """
+
+    path: str = ""
+    sort_by: str | None = None
+    sort_order: str | None = None
+    file_type: list[str] | str | None = None
+    uploaded_by: str | None = None
+
+
+@dataclass(frozen=True)
+class SearchFilters:
+    """Filters for ``/search_files``. Every filter that is set ANDs with the rest.
+
+    Attributes:
+        q: Case-insensitive substring of the name or path; max 256 chars.
+        file_type: Categories and explicit extensions; a file matches any.
+        size_min: Inclusive lower bound on plaintext size.
+        size_max: Inclusive upper bound on plaintext size.
+        date_from: Inclusive lower bound on ``created_at``, Unix seconds.
+        date_to: Inclusive upper bound on ``created_at``, Unix seconds.
+        uploaded_by: Exact uploader match.
+        sort_by: ``file_name``, ``size_bytes``, ``created_at``, ``updated_at``,
+            or ``uploaded_by``.
+        sort_order: ``asc`` or ``desc``.
+    """
+
+    q: str | None = None
+    file_type: list[str] | str | None = None
+    size_min: int | None = None
+    size_max: int | None = None
+    date_from: int | None = None
+    date_to: int | None = None
+    uploaded_by: str | None = None
+    sort_by: str | None = None
+    sort_order: str | None = None
 
 
 class Manifest(_Wire):
