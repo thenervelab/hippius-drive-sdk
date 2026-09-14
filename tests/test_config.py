@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -64,7 +65,8 @@ def test_mnemonic_file_is_expanded(tmp_path: Path) -> None:
 
 def test_malformed_config_is_reported_with_its_path(tmp_path: Path) -> None:
     path = write_config(tmp_path, "token = = =")
-    with pytest.raises(ConfigError, match=str(path)):
+    # `match` is a regex, and a Windows path is full of backslash escapes.
+    with pytest.raises(ConfigError, match=re.escape(str(path))):
         _config.load({}, environ={}, config_path=path)
 
 
