@@ -142,3 +142,14 @@ def test_every_error_is_a_drive_error() -> None:
     for name in errors.__all__:
         candidate = getattr(errors, name)
         assert issubclass(candidate, errors.DriveError)
+
+
+@pytest.mark.parametrize("value", [[1, "x"], [300], [1, None], [-1]])
+def test_a_malformed_byte_array_becomes_none_rather_than_raising(value: object) -> None:
+    # Byte fields arrive as JSON int arrays. A server sending something else
+    # must not crash the conflict path, which is the one place the SDK reads
+    # them straight off an error envelope.
+    body = {"Conflict": {"error": "conflict", "message": "m", "current_revision_id": value}}
+    with pytest.raises(errors.Conflict) as exc:
+        parse_envelope(409, body)
+    assert exc.value.current_revision_id is None

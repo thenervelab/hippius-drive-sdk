@@ -226,3 +226,95 @@ async def test_async_pick_region_skips_an_unhealthy_region() -> None:
     respx.get(f"{REGIONS[0]}/health").mock(return_value=httpx.Response(503))
     respx.get(f"{REGIONS[1]}/health").mock(return_value=httpx.Response(200, json={}))
     assert await pick_region_async() == REGIONS[1]
+
+
+# The async transport shares the retry policy but not the code path, so each
+# branch needs its own exercise; the sync tests above do not reach it.
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_connect_error_exhausts_the_ladder() -> None:
+    route = respx.get(f"{BASE}/list_folders/5G")
+    route.side_effect = httpx.ConnectError("boom")
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    t = AsyncTransport(BASE, "tok", sleep=sleep)
+    with pytest.raises(errors.TransportError):
+        await t.call(build.list_folders("5G"))
+    assert route.call_count == 3
+    assert len(slept) == 2
+    await t.aclose()
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_503_is_retried_then_surfaces_as_server_error() -> None:
+    route = respx.get(f"{BASE}/list_folders/5G")
+    route.return_value = httpx.Response(503, json={"Error": {"error": "x", "message": "m"}})
+
+    async def sleep(seconds: float) -> None:
+        return None
+
+    t = AsyncTransport(BASE, "tok", sleep=sleep)
+    with pytest.raises(errors.ServerError):
+        await t.call(build.list_folders("5G"))
+    assert route.call_count == 3
+    await t.aclose()
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_4xx_is_never_retried() -> None:
+    route = respx.get(f"{BASE}/list_folders/5G")
+    route.return_value = httpx.Response(404, json={"Error": {"error": "not_found", "message": ""}})
+    t = AsyncTransport(BASE, "tok")
+    with pytest.raises(errors.NotFound):
+        await t.call(build.list_folders("5G"))
+    assert route.call_count == 1
+    await t.aclose()
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_stream_connect_failure_is_a_transport_error() -> None:
+    respx.get(f"{BASE}/download/5G/abc/{'ff' * 32}").mock(side_effect=httpx.ConnectError("down"))
+    t = AsyncTransport(BASE, "tok")
+    with pytest.raises(errors.TransportError):
+        async with t.stream(build.download("5G", "abc", "ff" * 32)):
+            pass
+    await t.aclose()
+
+
+@respx.mock
+def test_sync_stream_connect_failure_is_a_transport_error() -> None:
+    respx.get(f"{BASE}/download/5G/abc/{'ff' * 32}").mock(side_effect=httpx.ConnectError("down"))
+    t, _ = transport()
+    with pytest.raises(errors.TransportError), t.stream(build.download("5G", "abc", "ff" * 32)):
+        pass
+    t.close()
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_pick_region_falls_back_to_the_first_when_all_fail() -> None:
+    for region in REGIONS:
+        respx.get(f"{region}/health").mock(side_effect=httpx.ConnectError("down"))
+    assert await pick_region_async() == REGIONS[0]
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_pick_region_prefers_the_first_healthy_region() -> None:
+    for region in REGIONS:
+        respx.get(f"{region}/health").mock(return_value=httpx.Response(200, json={}))
+    assert await pick_region_async() == REGIONS[0]
+
+
+@pytest.mark.anyio
+async def test_async_pick_region_rejects_an_empty_candidate_list() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        await pick_region_async([])

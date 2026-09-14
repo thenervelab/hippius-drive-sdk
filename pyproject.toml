@@ -50,6 +50,7 @@ dev = [
   "ruff==0.16.7",
   "ty==0.0.80",
   "pip-audit==2.10.1",
+  "pytest-cov==7.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -59,7 +60,11 @@ packages = ["hippius_drive"]
 include = ["hippius_drive", "tests", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
-addopts = "-q -m 'not e2e'"
+# Coverage is measured on every run so a gap shows up in review, not in a
+# quarterly audit. The floor sits just under where the suite actually is:
+# tight enough to catch erosion, loose enough that one new branch does not
+# fail the build before its test lands in the same commit.
+addopts = "-q -m 'not e2e' --cov=hippius_drive --cov-branch --cov-report=term-missing --cov-fail-under=98"
 testpaths = ["tests"]
 markers = ["e2e: hits the live Hippius service; needs HIPPIUS_TEST_TOKEN"]
 filterwarnings = ["error"]

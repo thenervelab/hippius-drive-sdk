@@ -1,5 +1,4 @@
 import json
-from email.parser import BytesParser
 from pathlib import Path
 
 import httpx
@@ -14,6 +13,7 @@ from hippius_drive.client import AsyncClient, Client
 from hippius_drive.crypto import file_cipher, hashes
 from hippius_drive.identity import Identity, tos_text
 from hippius_drive.models import Manifest
+from tests.helpers import multipart_parts
 
 BASE = "https://example.test"
 MASTER = " ".join(["abandon"] * 23 + ["art"])
@@ -44,22 +44,6 @@ def upload_ok(revision: int = 1) -> httpx.Response:
             }
         },
     )
-
-
-def multipart_parts(request: httpx.Request) -> list[tuple[str, str, bytes]]:
-    """Parse a multipart body into (field name, content type, payload) in order."""
-    head = f"Content-Type: {request.headers['content-type']}\r\nMIME-Version: 1.0\r\n\r\n".encode()
-    message = BytesParser().parsebytes(head + request.content)
-    parts: list[tuple[str, str, bytes]] = []
-    for part in message.walk():
-        disposition = str(part.get("Content-Disposition", ""))
-        if 'name="' not in disposition:
-            continue
-        name = disposition.split('name="', 1)[1].split('"', 1)[0]
-        payload = part.get_payload(decode=True)
-        assert isinstance(payload, bytes)
-        parts.append((name, part.get_content_type(), payload))
-    return parts
 
 
 @respx.mock
@@ -391,3 +375,57 @@ async def test_async_put_and_delete(identity: Identity) -> None:
         result = await client.files.put_bytes(b"hello", "a.bin")
         assert result.revision_id == bytes([6] * 32)
         assert (await client.files.delete(file_id)).status == "deleted"
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_put_from_a_path(identity: Identity, tmp_path: Path) -> None:
+    route = respx.post(f"{BASE}/upload").mock(return_value=upload_ok(8))
+    local = tmp_path / "a.bin"
+    local.write_bytes(b"from disk")
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        result = await client.files.put(local, "docs/a.bin")
+    assert result.revision_id == bytes([8] * 32)
+    manifest = Manifest.model_validate_json(multipart_parts(route.calls.last.request)[0][2])
+    assert manifest.size_bytes == len(b"from disk")
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_browse_defaults_to_the_folder_root(identity: Identity) -> None:
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
+        return_value=httpx.Response(200, json={"Success": {"folders": [], "files": []}})
+    )
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        await client.files.browse()
+    assert dict(route.calls.last.request.url.params)["path"] == ""
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_download_that_dies_mid_body_leaves_no_part_file(
+    identity: Identity, tmp_path: Path
+) -> None:
+    # A stream that dies must surface as TransportError and leave no .part
+    # file behind for the next run to trip over.
+    respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{'ff' * 32}").mock(
+        side_effect=httpx.ReadError("connection reset")
+    )
+    dest = tmp_path / "a.bin"
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        with pytest.raises(errors.TransportError):
+            await client.files.get("ff" * 32, dest)
+    assert not dest.exists()
+    assert not dest.with_name("a.bin.part").exists()
+
+
+def test_async_client_reports_its_server_url(identity: Identity) -> None:
+    client = AsyncClient(token="tok", identity=identity, transport=AsyncTransport(BASE, "tok"))
+    assert client.server_url == BASE
+    assert client.transport.base_url == BASE

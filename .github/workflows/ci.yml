@@ -104,7 +104,9 @@ jobs:
             echo "::notice::live credentials not configured; the live suite did not run"
             exit 0
           fi
-          uv run pytest -m e2e
+          # --no-cov: this run exercises only the live suite, so the coverage
+          # floor in addopts would fail it. The matrix jobs enforce coverage.
+          uv run pytest -m e2e --no-cov
 
   ci:
     name: ci

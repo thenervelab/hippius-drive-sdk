@@ -1,6 +1,7 @@
 import base64
 
 import pytest
+from nacl import bindings
 
 from hippius_drive.crypto import mnemonic_blob as mb
 
@@ -76,3 +77,58 @@ def test_blob_survives_a_json_round_trip() -> None:
     blob = mb.seal(PHRASE, "pass", SS58, kdf=FAST)
     restored = mb.SealedBlob.model_validate_json(blob.model_dump_json())
     assert mb.open_blob(restored, "pass", SS58) == PHRASE
+
+
+# Every field below is attacker- or corruption-controlled: the blob is fetched
+# from a server, so a malformed one must fail loudly rather than panic the
+# process or silently produce the wrong seed.
+
+
+@pytest.mark.parametrize("field", ["salt", "nonce", "ciphertext"])
+def test_non_base64_fields_are_rejected(field: str) -> None:
+    blob = mb.seal(PHRASE, "pass", SS58, kdf=FAST)
+    forged = blob.model_copy(update={field: "not!base64!"})
+    with pytest.raises(mb.MnemonicBlobError, match="base64"):
+        mb.open_blob(forged, "pass", SS58)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        mb.KdfParams(memory_kib=1, time_cost=1, parallelism=1),
+        mb.KdfParams(memory_kib=19456, time_cost=0, parallelism=1),
+        mb.KdfParams(memory_kib=19456, time_cost=2, parallelism=0),
+    ],
+    ids=["memory-too-low", "zero-time-cost", "zero-parallelism"],
+)
+def test_impossible_kdf_parameters_are_reported_not_raised_raw(params: mb.KdfParams) -> None:
+    blob = mb.seal(PHRASE, "pass", SS58, kdf=FAST)
+    forged = blob.model_copy(update={"kdf": params})
+    with pytest.raises(mb.MnemonicBlobError, match="Argon2"):
+        mb.open_blob(forged, "pass", SS58)
+
+
+def test_a_sealed_non_utf8_payload_is_reported_as_such() -> None:
+    # Decrypts cleanly but is not text: a hand-rolled blob, or a format change
+    # on the other side, must not surface as a UnicodeDecodeError.
+    salt, nonce = bytes(range(mb.SALT_LEN)), bytes(range(mb.NONCE_LEN))
+    key = mb._derive_key("pass", salt, FAST)
+    ciphertext = bindings.crypto_aead_xchacha20poly1305_ietf_encrypt(
+        b"\xff\xfe not text", SS58.encode(), nonce, key
+    )
+    forged = mb.SealedBlob(
+        ciphertext=base64.b64encode(ciphertext).decode(),
+        salt=base64.b64encode(salt).decode(),
+        nonce=base64.b64encode(nonce).decode(),
+        aad=base64.b64encode(SS58.encode()).decode(),
+        kdf=FAST,
+    )
+    with pytest.raises(mb.MnemonicBlobError, match="UTF-8"):
+        mb.open_blob(forged, "pass", SS58)
+
+
+def test_seal_rejects_kdf_parameters_it_cannot_use() -> None:
+    impossible = mb.KdfParams(memory_kib=1, time_cost=1, parallelism=1)
+    inputs = mb.SealInputs(salt=bytes(16), nonce=bytes(24), kdf=impossible)
+    with pytest.raises(mb.MnemonicBlobError, match="Argon2"):
+        mb.seal_with(PHRASE, "pass", SS58, inputs)

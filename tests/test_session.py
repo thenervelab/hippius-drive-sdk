@@ -242,3 +242,43 @@ async def test_async_failed_finalize_deletes_the_session(identity: Identity) -> 
                 await _session.upload_via_session_async(client, up, plan)
 
     assert deleted.call_count == 1
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_resends_a_chunk_the_status_says_is_missing(identity: Identity) -> None:
+    respx.post(f"{BASE}/upload/session").mock(return_value=created())
+    chunks = chunk_route().mock(side_effect=chunk_ok)
+    respx.post(f"{BASE}/upload/session/s1/finalize").mock(return_value=finalized())
+
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        with prepared(identity) as up:
+            plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=1)
+            total = plan.total_chunks
+            mock_status(total, list(range(total - 1)))
+            await _session.upload_via_session_async(client, up, plan)
+
+    assert sorted(sent_indices(chunks)) == [*range(total), total - 1]
+
+
+def test_sending_no_chunks_is_a_no_op_rather_than_a_crash(
+    client: Client, identity: Identity
+) -> None:
+    # An empty index set reaches ThreadPoolExecutor(0), which raises. The guard
+    # is unreachable from upload_via_session today; this pins the contract so a
+    # future caller cannot trip over it.
+    with prepared(identity) as up:
+        plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK)
+        _session._send(client, plan, "s1", [])
+
+
+@pytest.mark.anyio
+async def test_async_sending_no_chunks_is_a_no_op(identity: Identity) -> None:
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        with prepared(identity) as up:
+            plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK)
+            await _session._send_async(client, plan, "s1", [])

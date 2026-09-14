@@ -6,6 +6,7 @@ import pytest
 import respx
 from click.testing import CliRunner, Result
 
+from hippius_drive import cli
 from hippius_drive.cli import main
 from hippius_drive.crypto import file_cipher, hashes, kdf, mnemonic_store
 from hippius_drive.identity import Identity
@@ -391,3 +392,114 @@ def test_the_cli_only_imports_the_public_surface() -> None:
         if line.startswith("from hippius_drive") and "import _" in line
     }
     assert private <= {"from hippius_drive import __version__, _config, errors"}
+
+
+def test_init_prompts_for_a_password_when_the_env_does_not_supply_one(tmp_path: Path) -> None:
+    path = tmp_path / "enc.json"
+    result = CliRunner().invoke(
+        main,
+        ["init"],
+        env={"HIPPIUS_MNEMONIC_FILE": str(path)},
+        input="hunter22\nhunter22\n",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    phrase = result.output.strip().splitlines()[-1]
+    assert mnemonic_store.load(path, "hunter22") == phrase
+
+
+def test_a_mismatched_password_confirmation_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "enc.json"
+    result = CliRunner().invoke(
+        main,
+        ["init"],
+        env={"HIPPIUS_MNEMONIC_FILE": str(path)},
+        input="hunter22\ntypo\nhunter22\nhunter22\n",
+        catch_exceptions=False,
+    )
+    assert "do not match" in result.output.lower()
+    assert result.exit_code == 0
+
+
+def test_no_password_and_no_tty_names_the_env_var(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The shape of a CI run with the mnemonic file present but no password:
+    # it must say which variable to set, not hang waiting on stdin.
+    env.pop("HIPPIUS_PASSWORD")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    result = run(["whoami"], env)
+    assert result.exit_code != 0
+    assert "HIPPIUS_PASSWORD" in result.output
+
+
+def test_a_rejected_input_becomes_a_message_not_a_traceback(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    # ValueError from the SDK (here: a traversing relative path) is translated
+    # by DriveGroup rather than reaching the user as a stack trace.
+    local = tmp_path / "a.bin"
+    local.write_bytes(b"x")
+    result = CliRunner().invoke(main, ["put", str(local), "../escape.bin"], env=env)
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "relative_path" in result.output
+
+
+@respx.mock
+def test_rm_reports_per_id_failures_on_stderr(env: dict[str, str]) -> None:
+    respx.post(f"{BASE}/delete_files").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "Success": {
+                    "deleted": [{"file_id": "aa", "status": "deleted"}],
+                    "errors": [{"file_id": "bb", "error": "database_error"}],
+                    "files_deleted": 1,
+                }
+            },
+        )
+    )
+    result = run(["rm", "a.bin", "b.bin"], env)
+    assert "deleted 1" in result.output
+    assert "database_error" in result.output
+
+
+def test_run_is_the_console_script_entry_point() -> None:
+    assert cli.run.__module__ == "hippius_drive.cli"
+    # pyproject points the console script here; a rename would break the
+    # installed `hippius-drive` command without failing any other test.
+    text = Path("pyproject.toml").read_text(encoding="utf-8")
+    assert 'hippius-drive = "hippius_drive.cli:run"' in text
+
+
+@respx.mock
+def test_mv_finds_the_right_file_among_several(env: dict[str, str]) -> None:
+    other = {**FILE_JSON, "path_hash": list(hashes.path_hash("z.bin")), "relative_path": "z.bin"}
+    respx.get(f"{BASE}/get_state/{SS58}/{FOLDER}").mock(
+        return_value=httpx.Response(
+            200, json={"Success": {"files": [other, FILE_JSON], "has_more": False}}
+        )
+    )
+    rename = respx.post(f"{BASE}/rename_files").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "Success": {
+                    "renamed_count": 1,
+                    "successes": [
+                        {
+                            "old_path_hash": [1] * 32,
+                            "new_path_hash": [2] * 32,
+                            "new_revision_id": [3] * 32,
+                            "new_revision_seq": 2,
+                        }
+                    ],
+                    "failures": [],
+                }
+            },
+        )
+    )
+    assert run(["mv", "a.bin", "b.bin"], env).exit_code == 0
+    entry = json.loads(rename.calls.last.request.content)["renames"][0]
+    assert bytes(entry["old_path_hash"]) == hashes.path_hash("a.bin")
