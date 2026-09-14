@@ -7,10 +7,10 @@ differ only in whether they await the transport. Namespaces (``folders``,
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import TracebackType
-from typing import Any, TypeVar
+from typing import TypeVar
 
 import httpx
 
@@ -510,6 +510,14 @@ class Client:
         """
         return self.run(_ops.can_upload(self.identity, size_bytes))
 
+    def health(self) -> models.HealthResult:
+        """Probe the server: liveness, build version, and capability list.
+
+        Returns:
+            What the server reported.
+        """
+        return self.run(_ops.health())
+
     def close(self) -> None:
         """Close the underlying connection pool."""
         self._transport.close()
@@ -625,7 +633,9 @@ class AsyncFileOps:
         """
         return await self._client.run(_ops.get_state(self._client.identity, offset, limit))
 
-    async def iter_state(self, page_size: int = DEFAULT_PAGE_SIZE) -> Any:
+    async def iter_state(
+        self, page_size: int = DEFAULT_PAGE_SIZE
+    ) -> AsyncIterator[models.RemoteFileEntry]:
         """Walk every file in the folder, paging until the server says stop.
 
         Args:
@@ -908,6 +918,14 @@ class AsyncClient:
             The verdict.
         """
         return await self.run(_ops.can_upload(self.identity, size_bytes))
+
+    async def health(self) -> models.HealthResult:
+        """Probe the server: liveness, build version, and capability list.
+
+        Returns:
+            What the server reported.
+        """
+        return await self.run(_ops.health())
 
     async def aclose(self) -> None:
         """Close the underlying connection pool."""

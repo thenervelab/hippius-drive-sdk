@@ -106,7 +106,7 @@ def test_summaries() -> None:
 
 
 def test_upload_multipart_puts_manifest_first() -> None:
-    r = build.upload(manifest_json=b"{}", ciphertext=b"\x00", ciphertext_len=1)
+    r = build.upload(manifest_json=b"{}", ciphertext=b"\x00")
     assert r.method == "POST"
     assert r.path == "/upload"
     assert r.files is not None

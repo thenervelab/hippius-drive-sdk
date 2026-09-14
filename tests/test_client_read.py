@@ -357,3 +357,17 @@ async def test_async_register_absorbs_a_409(identity: Identity) -> None:
         token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
     ) as client:
         assert (await client.folders.register()).status == "already_registered"
+
+
+@respx.mock
+def test_health_reports_the_version_and_capabilities(client: Client) -> None:
+    respx.get(f"{BASE}/health").mock(
+        return_value=httpx.Response(
+            200,
+            json={"status": "healthy", "version": "1.2.3", "capabilities": ["chunked_upload"]},
+        )
+    )
+    result = client.health()
+    assert result.status == "healthy"
+    assert result.version == "1.2.3"
+    assert result.capabilities == ["chunked_upload"]

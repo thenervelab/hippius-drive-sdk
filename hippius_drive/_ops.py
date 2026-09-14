@@ -110,6 +110,18 @@ def unregister_folder(
     )
 
 
+def health() -> Op[models.HealthResult]:
+    """Probe the service: liveness, build version, and its capability list.
+
+    Unauthenticated. The capability list is informational; upload routing is
+    decided by size, not by asking the server.
+
+    Returns:
+        The operation.
+    """
+    return Op(build.health(), _parser(models.HealthResult))
+
+
 def list_folder_entries(identity: Identity) -> Op[models.ListFolderEntriesResult]:
     """List the registered empty-directory paths for this folder.
 
@@ -255,11 +267,7 @@ def upload(prepared: PreparedUpload) -> Op[models.UploadResult]:
         The operation.
     """
     return Op(
-        build.upload(
-            prepared.manifest.model_dump_json().encode(),
-            prepared.blob,
-            prepared.ciphertext_size,
-        ),
+        build.upload(prepared.manifest.model_dump_json().encode(), prepared.blob),
         _parser(models.UploadResult),
     )
 

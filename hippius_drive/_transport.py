@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from hippius_drive import errors
-from hippius_drive._wire import Request, build, parse_envelope
+from hippius_drive._wire import Request, parse_envelope
 
 EU_BASE_URL = "https://eu-central-1-arion.hippius.com"
 US_BASE_URL = "https://us-east-1-arion.hippius.com"
@@ -371,8 +371,3 @@ async def pick_region_async(
         if ok:
             return url
     return candidates[0]
-
-
-def health_request() -> Request:
-    """The unauthenticated ``/health`` request, exposed for diagnostics."""
-    return build.health()

@@ -383,7 +383,7 @@ class RequestBuilders:
         return Request("GET", f"/get_source_summary/{_segment(ss58)}")
 
     @staticmethod
-    def upload(manifest_json: bytes, ciphertext: bytes | IO[bytes], ciphertext_len: int) -> Request:
+    def upload(manifest_json: bytes, ciphertext: bytes | IO[bytes]) -> Request:
         """Build the multipart ``POST /upload``.
 
         The ``manifest`` field must come first: the server peeks the first field
@@ -392,12 +392,10 @@ class RequestBuilders:
         Args:
             manifest_json: The serialised manifest.
             ciphertext: The blob, in memory or as a readable file.
-            ciphertext_len: Blob length, for the transfer's progress accounting.
 
         Returns:
             The request.
         """
-        del ciphertext_len
         return Request(
             "POST",
             "/upload",
