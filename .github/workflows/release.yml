@@ -7,6 +7,14 @@ on:
 permissions:
   contents: read
 
+# Serialised per tag, and deliberately never cancelled. Two runs of the same tag
+# must not race to upload, but cancelling an in-flight publish is worse than the
+# race: it can leave a release half-uploaded, and PyPI reserves every filename it
+# has seen. `cancel-in-progress: false` is the whole point of this block.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # A tag is not a review. This rebuilds and retests the tagged commit before
   # anything reaches PyPI, because a release is the one artefact that cannot be
