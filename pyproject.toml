@@ -36,7 +36,7 @@ classifiers = [
 ]
 
 [project.scripts]
-hippius-drive = "hippius_drive.cli:main"
+hippius-drive = "hippius_drive.cli:run"
 
 [project.urls]
 Source = "https://github.com/thenervelab/hippius-drive-sdk"
@@ -81,6 +81,10 @@ convention = "google"
 # published API and read as the condition they carry (`except NotFound:`),
 # so the suffix is dropped deliberately rather than overlooked.
 "hippius_drive/errors.py" = ["N818"]
+# A click command's parameters are its user-facing flags, not an internal call
+# surface, and click passes every one by keyword. The argument-count rules
+# guard against wide internal APIs, which is not what these are.
+"hippius_drive/cli.py" = ["PLR0913", "PLR0917"]
 
 [tool.ruff.lint.pylint]
 max-args = 5
