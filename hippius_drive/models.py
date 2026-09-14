@@ -67,6 +67,26 @@ class BrowseOptions:
 
 
 @dataclass(frozen=True)
+class RenameSpec:
+    """One move, in the terms a caller has: paths, not hashes.
+
+    The client turns this into a :class:`SingleRename` by hashing both paths
+    and re-encrypting the new one.
+
+    Attributes:
+        old_relative_path: Where the file is now.
+        new_relative_path: Where it should be. Must not already exist.
+        base_revision_id: The revision the caller believes is current; read it
+            from ``files.state()``. Checked per entry, so one stale entry does
+            not fail the rest of the batch.
+    """
+
+    old_relative_path: str
+    new_relative_path: str
+    base_revision_id: bytes
+
+
+@dataclass(frozen=True)
 class SearchFilters:
     """Filters for ``/search_files``. Every filter that is set ANDs with the rest.
 

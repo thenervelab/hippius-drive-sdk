@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, BinaryIO
+from typing import IO, Any
 from urllib.parse import quote
 
 from hippius_drive import errors
@@ -114,7 +114,7 @@ def parse_envelope(status: int, body: Any, *, retry_after: int | None = None) ->
     raise AssertionError("unreachable: _raise_for always raises")  # pragma: no cover
 
 
-MultipartField = tuple[str, tuple[str | None, bytes | BinaryIO, str]]
+MultipartField = tuple[str, tuple[str | None, bytes | IO[bytes], str]]
 """An httpx multipart entry: ``(name, (filename, content, content_type))``."""
 
 
@@ -383,7 +383,7 @@ class RequestBuilders:
         return Request("GET", f"/get_source_summary/{_segment(ss58)}")
 
     @staticmethod
-    def upload(manifest_json: bytes, ciphertext: bytes | BinaryIO, ciphertext_len: int) -> Request:
+    def upload(manifest_json: bytes, ciphertext: bytes | IO[bytes], ciphertext_len: int) -> Request:
         """Build the multipart ``POST /upload``.
 
         The ``manifest`` field must come first: the server peeks the first field

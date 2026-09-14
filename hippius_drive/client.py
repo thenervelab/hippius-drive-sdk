@@ -8,10 +8,13 @@ differ only in whether they await the transport. Namespaces (``folders``,
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from types import TracebackType
 from typing import Any, TypeVar
 
-from hippius_drive import _ops, errors, models
+import httpx
+
+from hippius_drive import _ops, _session, _upload, errors, models
 from hippius_drive._ops import Op
 from hippius_drive._transport import (
     DEFAULT_TIMEOUT,
@@ -20,13 +23,62 @@ from hippius_drive._transport import (
     Transport,
     pick_region,
 )
+from hippius_drive._upload import UploadSpec
+from hippius_drive._wire import parse_envelope
+from hippius_drive.crypto import file_cipher, hashes
 from hippius_drive.identity import Identity
-from hippius_drive.models import BrowseOptions, SearchFilters
+from hippius_drive.models import BrowseOptions, RenameSpec, SearchFilters
 
 T = TypeVar("T")
 
 DEFAULT_PAGE_SIZE = 100
 """Page size ``iter_state`` uses; large enough to keep round trips down."""
+
+
+def _download_info(response: httpx.Response) -> models.DownloadInfo:
+    """Read the metadata headers that ride along with a download.
+
+    Raises the typed error first when the status is not a success: the body of
+    an error response is JSON, not ciphertext.
+    """
+    if response.status_code >= 400:  # noqa: PLR2004 - HTTP error boundary
+        response.read()
+        raise_for = (
+            response.json()
+            if response.headers.get("content-type", "").startswith("application/json")
+            else response.text
+        )
+        parse_envelope(response.status_code, raise_for)
+    revision = response.headers.get("X-Revision-Id")
+    return models.DownloadInfo(
+        size_bytes=int(response.headers.get("X-Size-Bytes", 0)),
+        revision_id=revision,
+        revision_seq=int(response.headers.get("X-Revision-Seq", 0)),
+    )
+
+
+async def _collect(response: httpx.Response) -> list[bytes]:
+    """Drain an async streaming body into chunks the sync frame decoder can pull.
+
+    The decoder is a plain generator, so it cannot await. Chunks are collected
+    rather than the whole body concatenated, which keeps peak memory at one
+    copy instead of two.
+    """
+    return [chunk async for chunk in response.aiter_bytes()]
+
+
+def _rename_entry(identity: Identity, spec: RenameSpec) -> models.SingleRename:
+    """Turn a caller's paths into the hashes and ciphertext the server wants."""
+    old = hashes.normalize_relative_path(spec.old_relative_path)
+    new = hashes.normalize_relative_path(spec.new_relative_path)
+    return models.SingleRename(
+        old_path_hash=hashes.path_hash(old),
+        new_path_hash=hashes.path_hash(new),
+        new_encrypted_path=file_cipher.encrypt_bytes(new.encode(), identity.encryption_key),
+        new_file_name=new.rsplit("/", 1)[-1],
+        new_relative_path=new,
+        base_revision_id=spec.base_revision_id,
+    )
 
 
 class FolderOps:
@@ -200,6 +252,186 @@ class FileOps:
             The page.
         """
         return self._client.run(_ops.search(self._client.identity, filters, offset, limit))
+
+    def file_id(self, relative_path: str) -> str:
+        """Return the ``file_id`` for a relative path, without a round trip.
+
+        The id is ``hex(BLAKE3(NFC path))``. The desktop client hashes raw OS
+        bytes, so a macOS-created file with an accented name can carry an NFD
+        id this will not reproduce; find those through :meth:`state` instead.
+
+        Args:
+            relative_path: Folder-relative POSIX path.
+
+        Returns:
+            The 64-char hex id.
+        """
+        return hashes.path_hash(relative_path).hex()
+
+    def put(
+        self,
+        local_path: Path,
+        relative_path: str,
+        *,
+        base_revision_id: bytes | None = None,
+        revision_seq: int | None = None,
+    ) -> models.UploadResult:
+        """Encrypt and upload a local file.
+
+        Routes by ciphertext size the way hcfs-client does: a blob that fits
+        one 8 MiB transport chunk goes as a single multipart request, and
+        anything larger goes through a chunked session.
+
+        Args:
+            local_path: The file to upload.
+            relative_path: Where it lands in the folder.
+            base_revision_id: The revision being replaced, or None for a new file.
+            revision_seq: The current sequence plus one; required with a base.
+
+        Returns:
+            The upload result, carrying the new ``revision_id``.
+
+        Raises:
+            Conflict: If ``base_revision_id`` does not match the server.
+            QuotaExceeded: If the write is over the account's allowance.
+        """
+        spec = UploadSpec(relative_path, base_revision_id, revision_seq)
+        return self._put(_upload.PlaintextSource.from_path(local_path), spec)
+
+    def put_bytes(
+        self,
+        data: bytes,
+        relative_path: str,
+        *,
+        base_revision_id: bytes | None = None,
+        revision_seq: int | None = None,
+    ) -> models.UploadResult:
+        """Encrypt and upload an in-memory buffer.
+
+        Args:
+            data: The plaintext to upload.
+            relative_path: Where it lands in the folder.
+            base_revision_id: The revision being replaced, or None for a new file.
+            revision_seq: The current sequence plus one; required with a base.
+
+        Returns:
+            The upload result.
+        """
+        spec = UploadSpec(relative_path, base_revision_id, revision_seq)
+        return self._put(_upload.PlaintextSource.from_bytes(data), spec)
+
+    def _put(self, source: _upload.PlaintextSource, spec: UploadSpec) -> models.UploadResult:
+        client = self._client
+        with _upload.prepare(client.identity, source, spec) as prepared:
+            if prepared.transport_chunk_count() > 1:
+                return _session.upload_via_session(client, prepared)
+            return client.run(_ops.upload(prepared))
+
+    def get(self, file_id: str, dest: Path) -> models.DownloadInfo:
+        """Download and decrypt a file to ``dest``.
+
+        Plaintext goes to a sibling ``.part`` file and is renamed into place
+        only after the last frame authenticates, so a failed download never
+        leaves a half-decrypted file where the real one should be.
+
+        Args:
+            file_id: 64-char hex ``path_hash``.
+            dest: Where to write the plaintext.
+
+        Returns:
+            The size and revision the server reported.
+
+        Raises:
+            NotFound: If no file exists at that id.
+            DecryptError: If any frame fails authentication.
+        """
+        part = dest.with_name(dest.name + ".part")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        key = self._client.identity.encryption_key
+        with self._client.transport.stream(
+            _ops.download(self._client.identity, file_id)
+        ) as response:
+            info = _download_info(response)
+            try:
+                with part.open("wb") as out:
+                    reader = _upload.reader_over(response.iter_bytes())
+                    for chunk in file_cipher.decrypt_stream(reader, key):
+                        out.write(chunk)
+            except BaseException:
+                part.unlink(missing_ok=True)
+                raise
+        part.replace(dest)
+        return info
+
+    def get_bytes(self, file_id: str) -> bytes:
+        """Download and decrypt a file into memory.
+
+        Use :meth:`get` for anything large; this holds the whole plaintext.
+
+        Args:
+            file_id: 64-char hex ``path_hash``.
+
+        Returns:
+            The plaintext.
+        """
+        key = self._client.identity.encryption_key
+        with self._client.transport.stream(
+            _ops.download(self._client.identity, file_id)
+        ) as response:
+            _download_info(response)
+            reader = _upload.reader_over(response.iter_bytes())
+            return b"".join(file_cipher.decrypt_stream(reader, key))
+
+    def delete(self, file_id: str) -> models.DeleteResult:
+        """Remove one file. Immediate, with no undo.
+
+        Args:
+            file_id: 64-char hex ``path_hash``.
+
+        Returns:
+            The result.
+
+        Raises:
+            NotFound: If the file was already gone.
+        """
+        return self._client.run(_ops.delete_file(self._client.identity, file_id))
+
+    def delete_many(self, file_ids: list[str], quiet: bool = False) -> models.BatchDeleteResult:
+        """Remove up to 1000 files in one transaction.
+
+        The server answers 200 even when individual ids fail, so inspect
+        ``errors`` rather than trusting the status.
+
+        Args:
+            file_ids: Hex path hashes to remove.
+            quiet: Omit successful entries from the response.
+
+        Returns:
+            The result.
+
+        Raises:
+            ValueError: If the batch exceeds the server cap of 1000.
+        """
+        return self._client.run(_ops.delete_files(self._client.identity, file_ids, quiet))
+
+    def rename(self, renames: list[RenameSpec]) -> models.BatchRenameResult:
+        """Re-key files without re-uploading ciphertext, under one signature.
+
+        The server answers 200 even when individual entries fail, so inspect
+        ``failures``.
+
+        Args:
+            renames: One spec per file to move.
+
+        Returns:
+            The result.
+
+        Raises:
+            ValueError: If the batch is empty or a path is invalid.
+        """
+        identity = self._client.identity
+        entries = [_rename_entry(identity, spec) for spec in renames]
+        return self._client.run(_ops.rename_files(identity, entries))
 
 
 class Client:
@@ -454,6 +686,152 @@ class AsyncFileOps:
             The page.
         """
         return await self._client.run(_ops.search(self._client.identity, filters, offset, limit))
+
+    def file_id(self, relative_path: str) -> str:
+        """Return the ``file_id`` for a relative path, without a round trip.
+
+        Args:
+            relative_path: Folder-relative POSIX path.
+
+        Returns:
+            The 64-char hex id.
+        """
+        return hashes.path_hash(relative_path).hex()
+
+    async def put(
+        self,
+        local_path: Path,
+        relative_path: str,
+        *,
+        base_revision_id: bytes | None = None,
+        revision_seq: int | None = None,
+    ) -> models.UploadResult:
+        """Encrypt and upload a local file.
+
+        Args:
+            local_path: The file to upload.
+            relative_path: Where it lands in the folder.
+            base_revision_id: The revision being replaced, or None for a new file.
+            revision_seq: The current sequence plus one; required with a base.
+
+        Returns:
+            The upload result.
+        """
+        spec = UploadSpec(relative_path, base_revision_id, revision_seq)
+        return await self._put(_upload.PlaintextSource.from_path(local_path), spec)
+
+    async def put_bytes(
+        self,
+        data: bytes,
+        relative_path: str,
+        *,
+        base_revision_id: bytes | None = None,
+        revision_seq: int | None = None,
+    ) -> models.UploadResult:
+        """Encrypt and upload an in-memory buffer.
+
+        Args:
+            data: The plaintext to upload.
+            relative_path: Where it lands in the folder.
+            base_revision_id: The revision being replaced, or None for a new file.
+            revision_seq: The current sequence plus one; required with a base.
+
+        Returns:
+            The upload result.
+        """
+        spec = UploadSpec(relative_path, base_revision_id, revision_seq)
+        return await self._put(_upload.PlaintextSource.from_bytes(data), spec)
+
+    async def _put(self, source: _upload.PlaintextSource, spec: UploadSpec) -> models.UploadResult:
+        client = self._client
+        with _upload.prepare(client.identity, source, spec) as prepared:
+            if prepared.transport_chunk_count() > 1:
+                return await _session.upload_via_session_async(client, prepared)
+            return await client.run(_ops.upload(prepared))
+
+    async def get(self, file_id: str, dest: Path) -> models.DownloadInfo:
+        """Download and decrypt a file to ``dest``.
+
+        Args:
+            file_id: 64-char hex ``path_hash``.
+            dest: Where to write the plaintext.
+
+        Returns:
+            The size and revision the server reported.
+        """
+        part = dest.with_name(dest.name + ".part")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        key = self._client.identity.encryption_key
+        async with self._client.transport.stream(
+            _ops.download(self._client.identity, file_id)
+        ) as response:
+            info = _download_info(response)
+            try:
+                with part.open("wb") as out:
+                    for chunk in file_cipher.decrypt_stream(
+                        _upload.reader_over(iter(await _collect(response))), key
+                    ):
+                        out.write(chunk)
+            except BaseException:
+                part.unlink(missing_ok=True)
+                raise
+        part.replace(dest)
+        return info
+
+    async def get_bytes(self, file_id: str) -> bytes:
+        """Download and decrypt a file into memory.
+
+        Args:
+            file_id: 64-char hex ``path_hash``.
+
+        Returns:
+            The plaintext.
+        """
+        key = self._client.identity.encryption_key
+        async with self._client.transport.stream(
+            _ops.download(self._client.identity, file_id)
+        ) as response:
+            _download_info(response)
+            reader = _upload.reader_over(iter(await _collect(response)))
+            return b"".join(file_cipher.decrypt_stream(reader, key))
+
+    async def delete(self, file_id: str) -> models.DeleteResult:
+        """Remove one file. Immediate, with no undo.
+
+        Args:
+            file_id: 64-char hex ``path_hash``.
+
+        Returns:
+            The result.
+        """
+        return await self._client.run(_ops.delete_file(self._client.identity, file_id))
+
+    async def delete_many(
+        self, file_ids: list[str], quiet: bool = False
+    ) -> models.BatchDeleteResult:
+        """Remove up to 1000 files in one transaction.
+
+        Args:
+            file_ids: Hex path hashes to remove.
+            quiet: Omit successful entries from the response.
+
+        Returns:
+            The result.
+        """
+        return await self._client.run(_ops.delete_files(self._client.identity, file_ids, quiet))
+
+    async def rename(self, renames: list[RenameSpec]) -> models.BatchRenameResult:
+        """Re-key files without re-uploading ciphertext, under one signature.
+
+        Args:
+            renames: One spec per file to move.
+
+        Returns:
+            The result.
+        """
+        identity = self._client.identity
+        entries = [_rename_entry(identity, spec) for spec in renames]
+        return await self._client.run(_ops.rename_files(identity, entries))
 
 
 class AsyncClient:

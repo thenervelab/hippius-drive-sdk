@@ -14,9 +14,10 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel
 
 from hippius_drive import models
+from hippius_drive._upload import TRANSPORT_CHUNK, PreparedUpload
 from hippius_drive._wire import Request, build
 from hippius_drive.crypto import kdf
-from hippius_drive.identity import Identity
+from hippius_drive.identity import Identity, rename_text
 from hippius_drive.models import BrowseOptions, SearchFilters
 
 T = TypeVar("T")
@@ -242,3 +243,185 @@ def can_upload(identity: Identity, size_bytes: int) -> Op[models.CanUploadResult
         build.can_upload(identity.account_ss58, identity.folder_hash, size_bytes),
         _parser(models.CanUploadResult),
     )
+
+
+def upload(prepared: PreparedUpload) -> Op[models.UploadResult]:
+    """Send a manifest and its blob in one multipart request.
+
+    Args:
+        prepared: The signed manifest and encrypted blob.
+
+    Returns:
+        The operation.
+    """
+    return Op(
+        build.upload(
+            prepared.manifest.model_dump_json().encode(),
+            prepared.blob,
+            prepared.ciphertext_size,
+        ),
+        _parser(models.UploadResult),
+    )
+
+
+def download(identity: Identity, file_id: str) -> Request:
+    """Build the download request; the body is streamed, so there is no parser.
+
+    Args:
+        identity: The account and folder identity.
+        file_id: 64-char hex ``path_hash``.
+
+    Returns:
+        The request.
+    """
+    return build.download(identity.account_ss58, identity.folder_hash, file_id)
+
+
+def delete_file(identity: Identity, file_id: str) -> Op[models.DeleteResult]:
+    """Remove one file. Immediate and with no undo.
+
+    Args:
+        identity: The account and folder identity.
+        file_id: 64-char hex ``path_hash``.
+
+    Returns:
+        The operation.
+    """
+    return Op(
+        build.delete(identity.account_ss58, identity.folder_hash, file_id),
+        _parser(models.DeleteResult),
+    )
+
+
+def delete_files(
+    identity: Identity, file_ids: list[str], quiet: bool = False
+) -> Op[models.BatchDeleteResult]:
+    """Remove up to 1000 files in one transaction.
+
+    Args:
+        identity: The account and folder identity.
+        file_ids: Hex path hashes to remove.
+        quiet: Omit successful entries from the response.
+
+    Returns:
+        The operation.
+
+    Raises:
+        ValueError: If the batch exceeds the server cap, which would otherwise
+            cost a round trip to learn.
+    """
+    if len(file_ids) > MAX_BATCH_DELETE:
+        raise ValueError(f"batch delete takes at most {MAX_BATCH_DELETE} ids, got {len(file_ids)}")
+    return Op(
+        build.delete_files(identity.account_ss58, identity.folder_hash, file_ids, quiet),
+        _parser(models.BatchDeleteResult),
+    )
+
+
+def rename_files(
+    identity: Identity, renames: list[models.SingleRename]
+) -> Op[models.BatchRenameResult]:
+    """Re-key files without moving ciphertext, under one signature.
+
+    The entries are sorted by ``old_path_hash`` before signing because the
+    server sorts the same way before it rebuilds the text to verify.
+
+    Args:
+        identity: The account and folder identity.
+        renames: One entry per file to move.
+
+    Returns:
+        The operation.
+
+    Raises:
+        ValueError: If the batch is empty.
+    """
+    if not renames:
+        raise ValueError("rename needs at least one entry")
+    ordered = sorted(renames, key=lambda r: r.old_path_hash)
+    signature = identity.sign(
+        rename_text([(r.old_path_hash, r.new_path_hash) for r in ordered]).encode()
+    )
+    return Op(
+        build.rename_files(
+            identity.account_ss58,
+            identity.folder_hash,
+            [r.model_dump(mode="json") for r in ordered],
+            signature,
+            identity.verifying_key,
+        ),
+        _parser(models.BatchRenameResult),
+    )
+
+
+def create_session(
+    prepared: PreparedUpload, chunk_size: int = TRANSPORT_CHUNK
+) -> Op[models.CreateSessionResult]:
+    """Open a chunked upload session for a blob too large for one request.
+
+    Args:
+        prepared: The signed manifest and encrypted blob.
+        chunk_size: Bytes per transport chunk.
+
+    Returns:
+        The operation.
+    """
+    return Op(
+        build.create_session(
+            prepared.manifest.model_dump(mode="json"),
+            prepared.transport_chunk_count(chunk_size),
+            chunk_size,
+            prepared.ciphertext_size,
+        ),
+        _parser(models.CreateSessionResult),
+    )
+
+
+def upload_chunk(session_id: str, index: int, data: bytes) -> Op[models.UploadChunkResult]:
+    """Send one chunk. Idempotent per index; order does not matter.
+
+    Args:
+        session_id: The session to write into.
+        index: Zero-based chunk index.
+        data: The raw chunk bytes.
+
+    Returns:
+        The operation.
+    """
+    return Op(build.upload_chunk(session_id, index, data), _parser(models.UploadChunkResult))
+
+
+def session_status(session_id: str) -> Op[models.SessionStatusResult]:
+    """Ask which chunks have landed, to decide what to resend.
+
+    Args:
+        session_id: The session to inspect.
+
+    Returns:
+        The operation.
+    """
+    return Op(build.session_status(session_id), _parser(models.SessionStatusResult))
+
+
+def finalize_session(session_id: str) -> Op[models.UploadResult]:
+    """Assemble the chunks and commit the file.
+
+    Args:
+        session_id: The session to commit.
+
+    Returns:
+        The operation.
+    """
+    return Op(build.finalize_session(session_id), _parser(models.UploadResult))
+
+
+def delete_session(session_id: str) -> Op[models.DeleteSessionResult]:
+    """Abort a session and release its temporary storage. Idempotent.
+
+    Args:
+        session_id: The session to abort.
+
+    Returns:
+        The operation.
+    """
+    return Op(build.delete_session(session_id), _parser(models.DeleteSessionResult))
