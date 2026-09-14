@@ -29,6 +29,9 @@ ITERATIONS = 600_000
 LEGACY_ITERATIONS = 10_000
 """What a blob with no ``iterations`` key was written with."""
 
+MAX_ITERATIONS = 10_000_000
+"""Upper bound on a file-supplied iteration count, so a corrupt blob cannot hang."""
+
 SALT_LEN = 16
 IV_LEN = 12
 KEY_LEN = 32
@@ -42,6 +45,10 @@ class MnemonicStoreError(Exception):
 def _derive_key(password: str, salt: bytes, iterations: int) -> bytes:
     if iterations <= 0:
         raise MnemonicStoreError("PBKDF2 iteration count must be non-zero")
+    if iterations > MAX_ITERATIONS:
+        raise MnemonicStoreError(
+            f"PBKDF2 iteration count {iterations} exceeds the cap of {MAX_ITERATIONS}"
+        )
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations, KEY_LEN)
 
 

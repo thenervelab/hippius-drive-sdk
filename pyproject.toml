@@ -51,6 +51,7 @@ dev = [
   "ty==0.0.80",
   "pip-audit==2.10.1",
   "pytest-cov==7.1.0",
+  "anyio==4.15.1",
 ]
 
 [tool.hatch.build.targets.wheel]

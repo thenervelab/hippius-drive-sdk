@@ -2,6 +2,7 @@ import pytest
 
 from hippius_drive import errors
 from hippius_drive._wire import parse_envelope
+from hippius_drive.crypto.file_cipher import DecryptError as CipherDecryptError
 
 
 def test_success_unwraps() -> None:
@@ -142,6 +143,17 @@ def test_every_error_is_a_drive_error() -> None:
     for name in errors.__all__:
         candidate = getattr(errors, name)
         assert issubclass(candidate, errors.DriveError)
+
+
+def test_decrypt_error_is_a_drive_error_with_a_local_code() -> None:
+    exc = errors.DecryptError("frame 0 failed authentication")
+    assert isinstance(exc, errors.DriveError)
+    assert exc.code == "decrypt_error"
+    assert exc.status is None
+    assert not exc.retryable
+    assert CipherDecryptError is errors.DecryptError
+    assert "frame 0" in str(exc)
+    assert "transport " not in str(exc)
 
 
 @pytest.mark.parametrize("value", [[1, "x"], [300], [1, None], [-1]])

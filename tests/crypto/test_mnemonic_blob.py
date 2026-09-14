@@ -132,3 +132,33 @@ def test_seal_rejects_kdf_parameters_it_cannot_use() -> None:
     inputs = mb.SealInputs(salt=bytes(16), nonce=bytes(24), kdf=impossible)
     with pytest.raises(mb.MnemonicBlobError, match="Argon2"):
         mb.seal_with(PHRASE, "pass", SS58, inputs)
+
+
+def test_unknown_kdf_algorithm_is_rejected() -> None:
+    blob = mb.seal(PHRASE, "pass", SS58, kdf=FAST)
+    forged = blob.model_copy(update={"kdf": FAST.model_copy(update={"algorithm": "argon2i"})})
+    with pytest.raises(mb.MnemonicBlobError, match="unsupported KDF"):
+        mb.open_blob(forged, "pass", SS58)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("memory_kib", mb.MAX_MEMORY_KIB + 1),
+        ("time_cost", mb.MAX_TIME_COST + 1),
+        ("parallelism", mb.MAX_PARALLELISM + 1),
+    ],
+)
+def test_oversized_kdf_costs_are_rejected_before_argon2(field: str, value: int) -> None:
+    blob = mb.seal(PHRASE, "pass", SS58, kdf=FAST)
+    too_much = FAST.model_copy(update={field: value})
+    forged = blob.model_copy(update={"kdf": too_much})
+    with pytest.raises(mb.MnemonicBlobError, match=field):
+        mb.open_blob(forged, "pass", SS58)
+
+
+def test_short_salt_is_rejected_before_the_kdf() -> None:
+    blob = mb.seal(PHRASE, "pass", SS58, kdf=FAST)
+    forged = blob.model_copy(update={"salt": base64.b64encode(b"\x00" * 7).decode()})
+    with pytest.raises(mb.MnemonicBlobError, match="salt"):
+        mb.open_blob(forged, "pass", SS58)

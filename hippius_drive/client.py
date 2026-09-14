@@ -513,7 +513,7 @@ class Client:
         token: str,
         identity: Identity,
         server_url: str | None = None,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT,
         transport: Transport | None = None,
     ) -> None:
         """Build the client.
@@ -524,7 +524,9 @@ class Client:
             identity: The account address and folder keys.
             server_url: A specific server; otherwise the fastest healthy region
                 is probed once, here, rather than on every request.
-            timeout: Per-request timeout in seconds.
+            timeout: Connect/read/pool budget in seconds, or a full
+                ``httpx.Timeout``. A float leaves the write side uncapped so
+                a large upload on a slow link is not killed at 60s.
             transport: A pre-built transport, mainly for tests.
         """
         self.identity = identity
@@ -929,7 +931,7 @@ class AsyncClient:
         token: str,
         identity: Identity,
         server_url: str | None = None,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT,
         transport: AsyncTransport | None = None,
     ) -> None:
         """Build the client.
@@ -942,7 +944,8 @@ class AsyncClient:
             token: The bearer token the Hippius auth service issued.
             identity: The account address and folder keys.
             server_url: The server to talk to; the first region by default.
-            timeout: Per-request timeout in seconds.
+            timeout: Connect/read/pool budget in seconds, or a full
+                ``httpx.Timeout``. A float leaves the write side uncapped.
             transport: A pre-built transport, mainly for tests.
         """
         self.identity = identity

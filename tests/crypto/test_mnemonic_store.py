@@ -178,6 +178,16 @@ def test_a_non_integer_iterations_is_rejected(tmp_path: Path, value: object) -> 
         ms.load(path, "pw")
 
 
+def test_an_iteration_count_above_the_cap_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "e.json"
+    ms.save(path, PHRASE, "pw")
+    body = json.loads(path.read_text())
+    body["iterations"] = ms.MAX_ITERATIONS + 1
+    path.write_text(json.dumps(body))
+    with pytest.raises(ms.MnemonicStoreError, match="cap"):
+        ms.load(path, "pw")
+
+
 def test_a_negative_iterations_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "e.json"
     ms.save(path, PHRASE, "pw")

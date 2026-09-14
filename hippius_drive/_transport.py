@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
@@ -19,7 +19,11 @@ from typing import Any
 import httpx
 
 from hippius_drive import errors
+from hippius_drive._version import __version__
 from hippius_drive._wire import Request, parse_envelope
+
+USER_AGENT = f"hippius-drive/{__version__}"
+"""Identifies this SDK on the wire so a server can tell clients apart."""
 
 EU_BASE_URL = "https://eu-central-1-arion.hippius.com"
 US_BASE_URL = "https://us-east-1-arion.hippius.com"
@@ -30,6 +34,9 @@ PROBE_TIMEOUT = 5.0
 """Seconds to wait for a region's ``/health`` before giving up on it."""
 
 DEFAULT_TIMEOUT = 60.0
+"""Per-attempt connect/read/pool budget in seconds. Writes are uncapped: an
+8 MiB session chunk on a slow uplink would otherwise die at 60s."""
+
 MAX_ATTEMPTS = 3
 _BACKOFF_SECONDS = (0.5, 1.0, 2.0)
 _RETRYABLE_STATUSES = frozenset({502, 503, 504})
@@ -42,6 +49,13 @@ def _jittered(delay: float) -> float:
     return delay * (0.5 + random.random())  # noqa: S311 - backoff jitter, not crypto
 
 
+def _http_timeout(timeout: float | httpx.Timeout) -> httpx.Timeout:
+    """Apply ``timeout`` to connect/read/pool, never to the request body write."""
+    if isinstance(timeout, httpx.Timeout):
+        return timeout
+    return httpx.Timeout(timeout, write=None)
+
+
 def prepare(request: Request, token: str) -> dict[str, Any]:
     """Turn a :class:`Request` into httpx keyword arguments.
 
@@ -52,7 +66,7 @@ def prepare(request: Request, token: str) -> dict[str, Any]:
     Returns:
         Keyword arguments for ``httpx.Client.request``.
     """
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT}
     if request.headers:
         headers.update(request.headers)
 
@@ -130,7 +144,7 @@ class Transport:
         self,
         base_url: str,
         token: str,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT,
         *,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -139,13 +153,14 @@ class Transport:
         Args:
             base_url: The server root, without a trailing slash.
             token: The bearer token.
-            timeout: Per-request timeout in seconds.
+            timeout: Connect/read/pool budget in seconds, or a full
+                ``httpx.Timeout``. A float leaves the write side uncapped.
             sleep: Injected so tests do not actually wait out the backoff.
         """
         self.base_url = base_url.rstrip("/")
         self._token = token
         self._sleep = sleep
-        self._client = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self._client = httpx.Client(base_url=self.base_url, timeout=_http_timeout(timeout))
 
     def send(self, request: Request) -> httpx.Response:
         """Send ``request``, retrying only failures that say nothing about it.
@@ -226,7 +241,7 @@ class AsyncTransport:
         self,
         base_url: str,
         token: str,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT,
         *,
         sleep: Callable[[float], Any] = asyncio.sleep,
     ) -> None:
@@ -235,13 +250,14 @@ class AsyncTransport:
         Args:
             base_url: The server root, without a trailing slash.
             token: The bearer token.
-            timeout: Per-request timeout in seconds.
+            timeout: Connect/read/pool budget in seconds, or a full
+                ``httpx.Timeout``. A float leaves the write side uncapped.
             sleep: Injected so tests do not actually wait out the backoff.
         """
         self.base_url = base_url.rstrip("/")
         self._token = token
         self._sleep = sleep
-        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
+        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=_http_timeout(timeout))
 
     async def send(self, request: Request) -> httpx.Response:
         """Send ``request``, retrying only failures that say nothing about it.
@@ -287,7 +303,7 @@ class AsyncTransport:
         return unwrap(await self.send(request))
 
     @asynccontextmanager
-    async def stream(self, request: Request) -> Any:
+    async def stream(self, request: Request) -> AsyncIterator[httpx.Response]:
         """Open ``request`` as a streaming response, for downloads.
 
         Args:
@@ -311,9 +327,9 @@ class AsyncTransport:
         await self._client.aclose()
 
 
-def _probe(client: httpx.Client, base_url: str) -> bool:
+def _probe(client: httpx.Client, base_url: str, timeout: float) -> bool:
     try:
-        response = client.get(f"{base_url.rstrip('/')}/health", timeout=PROBE_TIMEOUT)
+        response = client.get(f"{base_url.rstrip('/')}/health", timeout=timeout)
     except httpx.HTTPError:
         return False
     return response.is_success
@@ -328,7 +344,7 @@ def pick_region(candidates: Sequence[str] = REGIONS, timeout: float = PROBE_TIME
 
     Args:
         candidates: Region base URLs, in preference order.
-        timeout: Seconds to allow the probes in total.
+        timeout: Seconds each probe may take; probes run in parallel.
 
     Returns:
         The chosen base URL.
@@ -336,7 +352,7 @@ def pick_region(candidates: Sequence[str] = REGIONS, timeout: float = PROBE_TIME
     if not candidates:
         raise ValueError("pick_region needs at least one candidate")
     with httpx.Client(timeout=timeout) as client, ThreadPoolExecutor(len(candidates)) as pool:
-        healthy = list(pool.map(lambda url: _probe(client, url), candidates))
+        healthy = list(pool.map(lambda url: _probe(client, url, timeout), candidates))
     for url, ok in zip(candidates, healthy, strict=True):
         if ok:
             return url
@@ -350,7 +366,7 @@ async def pick_region_async(
 
     Args:
         candidates: Region base URLs, in preference order.
-        timeout: Seconds to allow the probes in total.
+        timeout: Seconds each probe may take; probes run in parallel.
 
     Returns:
         The chosen base URL.
@@ -360,7 +376,7 @@ async def pick_region_async(
 
     async def probe(client: httpx.AsyncClient, base_url: str) -> bool:
         try:
-            response = await client.get(f"{base_url.rstrip('/')}/health", timeout=PROBE_TIMEOUT)
+            response = await client.get(f"{base_url.rstrip('/')}/health", timeout=timeout)
         except httpx.HTTPError:
             return False
         return response.is_success

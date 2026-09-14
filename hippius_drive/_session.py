@@ -17,7 +17,7 @@ import contextlib
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar
+from typing import Protocol, TypeVar
 
 from hippius_drive import _ops, models
 from hippius_drive._ops import Op
@@ -40,7 +40,7 @@ class Runner(Protocol):
 class AsyncRunner(Protocol):
     """Async twin of :class:`Runner`."""
 
-    async def run(self, op: Op[T]) -> Any:
+    async def run(self, op: Op[T]) -> T:
         """Send an operation and parse its result."""
         ...
 
@@ -127,12 +127,23 @@ def upload_via_session(
 
 
 def _send(client: Runner, plan: SessionPlan, session_id: str, indices: Iterable[int]) -> None:
-    """Send the given chunk indices, up to ``plan.parallel`` at a time."""
-    payloads = plan.payloads(indices)
-    if not payloads:
+    """Send the given chunk indices, up to ``plan.parallel`` at a time.
+
+    Chunks are read in batches of ``parallel`` rather than all at once, so a
+    multi-gigabyte blob is not duplicated into RAM on top of the spool.
+    """
+    pending = list(indices)
+    if not pending:
         return
-    with ThreadPoolExecutor(min(plan.parallel, len(payloads))) as pool:
-        list(pool.map(lambda item: client.run(_ops.upload_chunk(session_id, *item)), payloads))
+    workers = min(plan.parallel, len(pending))
+
+    def put(item: tuple[int, bytes]) -> None:
+        client.run(_ops.upload_chunk(session_id, *item))
+
+    with ThreadPoolExecutor(workers) as pool:
+        for offset in range(0, len(pending), plan.parallel):
+            payloads = plan.payloads(pending[offset : offset + plan.parallel])
+            list(pool.map(put, payloads))
 
 
 async def upload_via_session_async(
@@ -177,8 +188,8 @@ async def _send_async(
     client: AsyncRunner, plan: SessionPlan, session_id: str, indices: Iterable[int]
 ) -> None:
     """Send the given chunk indices, up to ``plan.parallel`` in flight."""
-    payloads = plan.payloads(indices)
-    if not payloads:
+    pending = list(indices)
+    if not pending:
         return
     limit = asyncio.Semaphore(plan.parallel)
 
@@ -186,4 +197,6 @@ async def _send_async(
         async with limit:
             await client.run(_ops.upload_chunk(session_id, index, data))
 
-    await asyncio.gather(*(send(index, data) for index, data in payloads))
+    for offset in range(0, len(pending), plan.parallel):
+        payloads = plan.payloads(pending[offset : offset + plan.parallel])
+        await asyncio.gather(*(send(index, data) for index, data in payloads))

@@ -5,8 +5,10 @@ import respx
 from hippius_drive import errors
 from hippius_drive._transport import (
     REGIONS,
+    USER_AGENT,
     AsyncTransport,
     Transport,
+    _http_timeout,
     pick_region,
     pick_region_async,
     prepare,
@@ -25,8 +27,21 @@ def transport() -> tuple[Transport, list[float]]:
 def test_prepare_adds_the_bearer_token() -> None:
     kwargs = prepare(build.list_folders("5G"), "tok")
     assert kwargs["headers"]["Authorization"] == "Bearer tok"
+    assert kwargs["headers"]["User-Agent"] == USER_AGENT
+    assert USER_AGENT.startswith("hippius-drive/")
     assert kwargs["method"] == "GET"
     assert kwargs["url"] == "/list_folders/5G"
+
+
+def test_a_float_timeout_leaves_writes_uncapped() -> None:
+    timeout = _http_timeout(60.0)
+    assert timeout.write is None
+    assert timeout.connect == 60.0
+
+
+def test_an_explicit_timeout_is_kept() -> None:
+    given = httpx.Timeout(3.0, write=5.0)
+    assert _http_timeout(given) is given
 
 
 def test_prepare_keeps_an_explicit_empty_body() -> None:

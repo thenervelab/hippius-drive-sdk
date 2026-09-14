@@ -24,6 +24,8 @@ from typing import IO
 from nacl import bindings
 from nacl.exceptions import CryptoError
 
+from hippius_drive.errors import DecryptError
+
 CHUNK_SIZE = 256 * 1024
 """Plaintext bytes per frame. Fixed by the wire format; never tune it."""
 
@@ -33,9 +35,17 @@ HEADER_LEN = NONCE_LEN + 4
 FRAME_HEADER_LEN = 4
 MAX_FRAME_LEN = CHUNK_SIZE + TAG_LEN
 
-
-class DecryptError(ValueError):
-    """Ciphertext is malformed, truncated, or fails authentication."""
+__all__ = [
+    "CHUNK_SIZE",
+    "DecryptError",
+    "chunk_count",
+    "chunk_nonce",
+    "ciphertext_size",
+    "decrypt_bytes",
+    "decrypt_stream",
+    "encrypt_bytes",
+    "encrypt_stream",
+]
 
 
 def chunk_nonce(base_nonce: bytes, index: int) -> bytes:
