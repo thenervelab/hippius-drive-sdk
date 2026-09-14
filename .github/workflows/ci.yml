@@ -68,11 +68,40 @@ jobs:
       - name: Audit workflows
         run: uvx zizmor==1.22.0 --persona=pedantic .github/workflows/
 
+  e2e:
+    name: e2e
+    # Secrets are unavailable to fork pull requests, so the suite would skip
+    # anyway; not starting the job keeps the fork's checks legible.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen --all-groups
+
+      - name: Live round trip
+        env:
+          HIPPIUS_TEST_TOKEN: ${{ secrets.HIPPIUS_TEST_TOKEN }}
+          HIPPIUS_TEST_ACCOUNT_SS58: ${{ secrets.HIPPIUS_TEST_ACCOUNT_SS58 }}
+          HIPPIUS_TEST_MNEMONIC: ${{ secrets.HIPPIUS_TEST_MNEMONIC }}
+        run: uv run pytest -m e2e
+
   ci:
     name: ci
     # Single required check for branch protection: green only when every
     # matrix leg and the audit job succeeded.
-    needs: [test, audit]
+    needs: [test, audit, e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
