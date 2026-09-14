@@ -157,6 +157,16 @@ def test_oversized_kdf_costs_are_rejected_before_argon2(field: str, value: int) 
         mb.open_blob(forged, "pass", SS58)
 
 
+@pytest.mark.parametrize("field", ["memory_kib", "time_cost", "parallelism"])
+def test_a_negative_kdf_cost_is_a_blob_error_not_an_overflow(field: str) -> None:
+    # argon2-cffi takes uint32 costs, so -1 raises OverflowError, which is
+    # neither Argon2Error nor ValueError and would escape open_blob's contract.
+    blob = mb.seal(PHRASE, "pass", SS58, kdf=FAST)
+    forged = blob.model_copy(update={"kdf": FAST.model_copy(update={field: -1})})
+    with pytest.raises(mb.MnemonicBlobError, match="positive"):
+        mb.open_blob(forged, "pass", SS58)
+
+
 def test_short_salt_is_rejected_before_the_kdf() -> None:
     blob = mb.seal(PHRASE, "pass", SS58, kdf=FAST)
     forged = blob.model_copy(update={"salt": base64.b64encode(b"\x00" * 7).decode()})

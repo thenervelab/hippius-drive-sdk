@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Iterable
 
 import httpx
@@ -5,6 +6,7 @@ import pytest
 import respx
 
 from hippius_drive import _session, _upload, errors
+from hippius_drive._ops import Op
 from hippius_drive._transport import AsyncTransport, Transport
 from hippius_drive._upload import TRANSPORT_CHUNK, PlaintextSource, UploadSpec
 from hippius_drive.client import AsyncClient, Client
@@ -293,6 +295,36 @@ def test_send_reads_one_chunk_per_free_worker(
     assert max(widths) == 1
 
 
+@respx.mock
+def test_sync_failure_stops_the_window_and_still_deletes_the_session(
+    client: Client, identity: Identity
+) -> None:
+    # Chunk 0 is rejected while chunk 1 is in flight. The window must not be
+    # topped up after the failure, and the cleanup must still run.
+    respx.post(f"{BASE}/upload/session").mock(return_value=created())
+    chunks = chunk_route()
+
+    def reject_first(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/0"):
+            return httpx.Response(
+                401, json={"Error": {"error": "unauthorized", "message": "token rejected"}}
+            )
+        return chunk_ok(request)
+
+    chunks.side_effect = reject_first
+    deleted = respx.delete(f"{BASE}/upload/session/s1").mock(
+        return_value=httpx.Response(200, json={"Success": None})
+    )
+    with prepared(identity, SMALL_CHUNK * 8) as up:
+        plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+        with pytest.raises(errors.Unauthorized):
+            _session.upload_via_session(client, up, plan)
+
+    # At most the in-flight sibling, plus one top-up if it finished first.
+    assert len(chunks.calls) <= plan.parallel + 1
+    assert deleted.called
+
+
 def test_sending_no_chunks_is_a_no_op_rather_than_a_crash(
     client: Client, identity: Identity
 ) -> None:
@@ -358,3 +390,43 @@ async def test_async_send_releases_the_slot_if_the_read_fails(
             plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
             with pytest.raises(RuntimeError, match="spool gone"):
                 await _session._send_async(client, plan, "s1", [0, 1])
+
+
+class _StallingRunner:
+    """Fails the first chunk; every other chunk blocks until cancelled."""
+
+    def __init__(self) -> None:
+        self.started: list[int] = []
+        self.cancelled: list[int] = []
+
+    async def run(self, op: Op[object]) -> None:
+        index = int(op.request.path.rsplit("/", 1)[1])
+        self.started.append(index)
+        if index == 0:
+            raise errors.Unauthorized("unauthorized", "token rejected", 401)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.append(index)
+            raise
+
+
+@pytest.mark.anyio
+async def test_async_send_stops_launching_chunks_after_one_fails(identity: Identity) -> None:
+    # Once a PUT has failed the session is doomed, so reading and sending the
+    # rest of the spool is wasted bandwidth. Any sibling already in flight
+    # must be cancelled before the error propagates, or it would race the
+    # delete_session cleanup and the transport close.
+    runner = _StallingRunner()
+    tasks_before = asyncio.all_tasks()
+    with prepared(identity, SMALL_CHUNK * 8) as up:
+        plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+        with pytest.raises(errors.Unauthorized):
+            await asyncio.wait_for(
+                _session._send_async(runner, plan, "s1", range(plan.total_chunks)), timeout=5
+            )
+
+    assert runner.started[0] == 0
+    assert len(runner.started) <= plan.parallel
+    assert runner.cancelled == runner.started[1:]
+    assert asyncio.all_tasks() == tasks_before

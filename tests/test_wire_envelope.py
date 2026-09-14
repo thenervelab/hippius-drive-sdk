@@ -2,7 +2,6 @@ import pytest
 
 from hippius_drive import errors
 from hippius_drive._wire import parse_envelope
-from hippius_drive.crypto.file_cipher import DecryptError as CipherDecryptError
 
 
 def test_success_unwraps() -> None:
@@ -145,13 +144,18 @@ def test_every_error_is_a_drive_error() -> None:
         assert issubclass(candidate, errors.DriveError)
 
 
+def test_the_rendered_message_carries_the_status_only_when_there_is_one() -> None:
+    # The CLI prints str(exc) verbatim, so this is user-facing.
+    assert str(errors.NotFound("not_found", "no such file", 404)) == "404 not_found: no such file"
+    assert str(errors.TransportError("ConnectError: boom")) == "transport_error: ConnectError: boom"
+
+
 def test_decrypt_error_is_a_drive_error_with_a_local_code() -> None:
     exc = errors.DecryptError("frame 0 failed authentication")
     assert isinstance(exc, errors.DriveError)
     assert exc.code == "decrypt_error"
     assert exc.status is None
     assert not exc.retryable
-    assert CipherDecryptError is errors.DecryptError
     assert "frame 0" in str(exc)
     assert "transport " not in str(exc)
 

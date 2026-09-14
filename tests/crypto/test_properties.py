@@ -8,6 +8,7 @@ from hypothesis import strategies as st
 
 from hippius_drive.crypto import file_cipher as fc
 from hippius_drive.crypto import hashes
+from hippius_drive.errors import DecryptError
 from hippius_drive.identity import rename_text
 
 KEY = bytes(range(32))
@@ -37,7 +38,7 @@ def test_flipping_any_byte_after_the_header_is_detected(
     # flipped nonce byte changes every frame nonce, so every frame fails.
     index = data.draw(st.integers(min_value=0, max_value=len(blob) - 1))
     blob[index] ^= data.draw(st.integers(min_value=1, max_value=255))
-    with pytest.raises(fc.DecryptError):
+    with pytest.raises(DecryptError):
         fc.decrypt_bytes(bytes(blob), KEY)
 
 
@@ -46,7 +47,7 @@ def test_flipping_any_byte_after_the_header_is_detected(
 def test_any_proper_prefix_is_rejected(plaintext: bytes, data: st.DataObject) -> None:
     blob = fc.encrypt_bytes(plaintext, KEY)
     cut = data.draw(st.integers(min_value=0, max_value=len(blob) - 1))
-    with pytest.raises(fc.DecryptError):
+    with pytest.raises(DecryptError):
         fc.decrypt_bytes(blob[:cut], KEY)
 
 
@@ -54,7 +55,7 @@ def test_any_proper_prefix_is_rejected(plaintext: bytes, data: st.DataObject) ->
 @given(PLAINTEXT, st.binary(min_size=1, max_size=8))
 def test_any_suffix_is_rejected(plaintext: bytes, extra: bytes) -> None:
     blob = fc.encrypt_bytes(plaintext, KEY)
-    with pytest.raises(fc.DecryptError):
+    with pytest.raises(DecryptError):
         fc.decrypt_bytes(blob + extra, KEY)
 
 

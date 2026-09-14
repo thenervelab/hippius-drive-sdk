@@ -39,7 +39,7 @@ would be unrecoverable.
 An `Identity` is one account plus one folder's keys:
 
 ```python
-from hippius_drive.identity import Identity
+from hippius_drive import Identity
 
 identity = Identity.from_master(phrase, "default", account_ss58=account)
 ```
@@ -55,7 +55,7 @@ keys.
 
 ```python
 from pathlib import Path
-from hippius_drive.client import Client
+from hippius_drive import Client
 
 with Client(token=token, identity=identity) as client:
     client.folders.register()  # a 409 is treated as success
@@ -105,7 +105,7 @@ concurrent write.
 ## Listing
 
 ```python
-from hippius_drive.models import SearchFilters
+from hippius_drive import SearchFilters
 
 for entry in client.files.iter_state():  # pages until the server stops
     print(entry.relative_path, entry.size_bytes)
@@ -124,7 +124,7 @@ not in those two.
 ## Moving and deleting
 
 ```python
-from hippius_drive.models import RenameSpec
+from hippius_drive import RenameSpec
 
 client.files.rename([RenameSpec("work/report.pdf", "archive/report.pdf", entry.revision_id)])
 
@@ -152,7 +152,7 @@ verdict.
 ## Async
 
 ```python
-from hippius_drive.client import AsyncClient
+from hippius_drive import AsyncClient
 
 async with AsyncClient(
     token=token, identity=identity, server_url="https://eu-central-1-arion.hippius.com"
@@ -184,6 +184,7 @@ and `status`:
 | `RateLimited` | 429 | Too many live sessions; carries `retry_after` |
 | `ServerError` | 5xx | Retryable |
 | `TransportError` | — | No response arrived at all |
+| `DecryptError` | — | A downloaded blob is malformed or fails authentication; not retryable |
 
 `Conflict` during sync is an expected event, not a fault. The transport already
 retries connect failures, read timeouts and 502/503/504 with capped backoff; it

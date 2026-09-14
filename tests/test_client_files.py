@@ -208,7 +208,7 @@ def test_get_leaves_nothing_behind_when_a_frame_is_tampered(
         return_value=httpx.Response(200, content=bytes(blob))
     )
     dest = tmp_path / "a.bin"
-    with pytest.raises(file_cipher.DecryptError):
+    with pytest.raises(errors.DecryptError):
         client.files.get(file_id, dest)
     assert not dest.exists()
     assert not dest.with_name("a.bin.part").exists()
@@ -355,7 +355,7 @@ async def test_async_get_leaves_nothing_behind_when_a_frame_is_tampered(
     async with AsyncClient(
         token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
     ) as client:
-        with pytest.raises(file_cipher.DecryptError):
+        with pytest.raises(errors.DecryptError):
             await client.files.get(file_id, dest)
     assert not dest.exists()
     assert not dest.with_name("a.bin.part").exists()

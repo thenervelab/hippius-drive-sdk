@@ -132,6 +132,10 @@ def _send(client: Runner, plan: SessionPlan, session_id: str, indices: Iterable[
     The next chunk is read from the spool only when a worker is free, so RAM
     on top of the spool stays at ``parallel * chunk_size`` without a batch
     barrier that would idle workers on a slow PUT.
+
+    After a failure no further chunk is launched, but a blocking httpx request
+    cannot be interrupted, so leaving the pool waits for the up to
+    ``parallel - 1`` PUTs already in flight. The async twin cancels them.
     """
     pending = list(indices)
     if not pending:
@@ -206,6 +210,9 @@ async def _send_async(
 
     A slot is acquired before the next chunk is read, so a slow PUT does not
     idle the other workers and the spool is not copied into RAM all at once.
+    The first failure stops the launch loop and cancels the siblings in flight:
+    the session is doomed, and a PUT still running would race the caller's
+    ``delete_session`` cleanup and the transport close.
     """
     pending = list(indices)
     if not pending:
@@ -219,13 +226,30 @@ async def _send_async(
         finally:
             slots.release()
 
-    for index in pending:
-        await slots.acquire()
-        try:
-            payload = plan.payloads([index])[0]
-        except BaseException:
-            slots.release()
-            raise
-        tasks.append(asyncio.create_task(send(*payload)))
+    try:
+        for index in pending:
+            await slots.acquire()
+            tasks = _still_running(tasks)
+            # Read from this one task, so the spool's single file position is
+            # never shared (see payloads), but off the loop: an 8 MiB read
+            # would otherwise stall every other coroutine.
+            payload = (await asyncio.to_thread(plan.payloads, [index]))[0]
+            tasks.append(asyncio.create_task(send(*payload)))
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
-    await asyncio.gather(*tasks)
+
+def _still_running(tasks: list[asyncio.Task[None]]) -> list[asyncio.Task[None]]:
+    """Drop finished tasks, re-raising the first failure among them.
+
+    Keeps the list at ``parallel`` entries rather than one per chunk, and
+    surfaces a failed PUT at the next launch instead of at the final gather.
+    """
+    for task in tasks:
+        if task.done():
+            task.result()
+    return [task for task in tasks if not task.done()]

@@ -182,6 +182,10 @@ class Transport:
                 response = self._client.request(**kwargs)
             except _RETRYABLE_EXCEPTIONS as exc:
                 last = exc
+            except httpx.HTTPError as exc:
+                # A write error, protocol error or pool timeout may have landed
+                # a partial request, so it is not replayed.
+                raise _transport_error(exc) from exc
             else:
                 if attempt == attempts or response.status_code not in _RETRYABLE_STATUSES:
                     return response
@@ -279,6 +283,8 @@ class AsyncTransport:
                 response = await self._client.request(**kwargs)
             except _RETRYABLE_EXCEPTIONS as exc:
                 last = exc
+            except httpx.HTTPError as exc:
+                raise _transport_error(exc) from exc
             else:
                 if attempt == attempts or response.status_code not in _RETRYABLE_STATUSES:
                     return response
@@ -344,14 +350,19 @@ def pick_region(candidates: Sequence[str] = REGIONS, timeout: float = PROBE_TIME
 
     Args:
         candidates: Region base URLs, in preference order.
-        timeout: Seconds each probe may take; probes run in parallel.
+        timeout: Budget in seconds for each phase (connect, then read) of
+            each probe; probes run in parallel.
 
     Returns:
         The chosen base URL.
     """
     if not candidates:
         raise ValueError("pick_region needs at least one candidate")
-    with httpx.Client(timeout=timeout) as client, ThreadPoolExecutor(len(candidates)) as pool:
+    headers = {"User-Agent": USER_AGENT}
+    with (
+        httpx.Client(timeout=timeout, headers=headers) as client,
+        ThreadPoolExecutor(len(candidates)) as pool,
+    ):
         healthy = list(pool.map(lambda url: _probe(client, url, timeout), candidates))
     for url, ok in zip(candidates, healthy, strict=True):
         if ok:
@@ -366,7 +377,8 @@ async def pick_region_async(
 
     Args:
         candidates: Region base URLs, in preference order.
-        timeout: Seconds each probe may take; probes run in parallel.
+        timeout: Budget in seconds for each phase (connect, then read) of
+            each probe; probes run in parallel.
 
     Returns:
         The chosen base URL.
@@ -381,7 +393,8 @@ async def pick_region_async(
             return False
         return response.is_success
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    headers = {"User-Agent": USER_AGENT}
+    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
         healthy = await asyncio.gather(*(probe(client, url) for url in candidates))
     for url, ok in zip(candidates, healthy, strict=True):
         if ok:

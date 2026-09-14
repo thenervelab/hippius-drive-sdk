@@ -4,6 +4,7 @@ import os
 import pytest
 
 from hippius_drive.crypto import file_cipher as fc
+from hippius_drive.errors import DecryptError
 
 KEY = bytes(range(32))
 NONCE = bytes(range(24))
@@ -57,40 +58,40 @@ def test_ciphertext_size_matches_the_rust_estimate() -> None:
 def test_tamper_is_detected() -> None:
     blob = bytearray(fc.encrypt_bytes(b"hello", KEY))
     blob[-1] ^= 0xFF
-    with pytest.raises(fc.DecryptError):
+    with pytest.raises(DecryptError):
         fc.decrypt_bytes(bytes(blob), KEY)
 
 
 def test_truncated_frame_is_rejected() -> None:
     blob = fc.encrypt_bytes(b"hello", KEY)
-    with pytest.raises(fc.DecryptError):
+    with pytest.raises(DecryptError):
         fc.decrypt_bytes(blob[:-3], KEY)
 
 
 def test_trailing_bytes_are_rejected() -> None:
     blob = fc.encrypt_bytes(b"hello", KEY)
-    with pytest.raises(fc.DecryptError):
+    with pytest.raises(DecryptError):
         fc.decrypt_bytes(blob + b"\x00", KEY)
 
 
 def test_zero_chunk_count_is_rejected() -> None:
     blob = fc.encrypt_bytes(b"hello", KEY)
     forged = blob[:24] + (0).to_bytes(4, "little") + blob[28:]
-    with pytest.raises(fc.DecryptError):
+    with pytest.raises(DecryptError):
         fc.decrypt_bytes(forged, KEY)
 
 
 def test_oversize_frame_length_is_rejected_before_reading() -> None:
     blob = fc.encrypt_bytes(b"hello", KEY)
     forged = blob[:28] + (fc.MAX_FRAME_LEN + 1).to_bytes(4, "little") + blob[32:]
-    with pytest.raises(fc.DecryptError):
+    with pytest.raises(DecryptError):
         fc.decrypt_bytes(forged, KEY)
 
 
 def test_frame_shorter_than_the_tag_is_rejected() -> None:
     blob = fc.encrypt_bytes(b"hello", KEY)
     forged = blob[:28] + (15).to_bytes(4, "little") + blob[32:]
-    with pytest.raises(fc.DecryptError):
+    with pytest.raises(DecryptError):
         fc.decrypt_bytes(forged, KEY)
 
 

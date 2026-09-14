@@ -37,7 +37,6 @@ MAX_FRAME_LEN = CHUNK_SIZE + TAG_LEN
 
 __all__ = [
     "CHUNK_SIZE",
-    "DecryptError",
     "chunk_count",
     "chunk_nonce",
     "ciphertext_size",

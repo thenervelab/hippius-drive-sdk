@@ -46,6 +46,32 @@ def test_an_explicit_timeout_is_kept() -> None:
     assert _http_timeout(given) is given
 
 
+def test_transports_hand_the_uncapped_write_to_httpx() -> None:
+    t = Transport(BASE, "tok", timeout=7.0)
+    a = AsyncTransport(BASE, "tok", timeout=httpx.Timeout(3.0, write=5.0))
+    assert t._client.timeout == httpx.Timeout(7.0, write=None)
+    assert a._client.timeout == httpx.Timeout(3.0, write=5.0)
+    t.close()
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.WriteError("reset mid-body"), httpx.RemoteProtocolError("eof"), httpx.PoolTimeout("")],
+)
+def test_a_non_retryable_httpx_failure_is_a_transport_error(failure: httpx.HTTPError) -> None:
+    # A partial request may have landed, so it is not replayed; but the caller
+    # still gets the SDK's error type, never a raw httpx exception.
+    route = respx.get(f"{BASE}/list_folders/5G")
+    route.side_effect = failure
+    t, slept = transport()
+    with pytest.raises(errors.TransportError, match=type(failure).__name__):
+        t.call(build.list_folders("5G"))
+    assert route.call_count == 1
+    assert slept == []
+    t.close()
+
+
 def test_prepare_keeps_an_explicit_empty_body() -> None:
     kwargs = prepare(build.finalize_session("s1"), "tok")
     assert kwargs["content"] == b""
@@ -199,6 +225,7 @@ def test_pick_region_forwards_timeout_into_each_probe(
 
     def recording_get(self: httpx.Client, url: object, **kwargs: object) -> httpx.Response:
         seen.append(kwargs.get("timeout"))
+        assert self.headers["user-agent"] == USER_AGENT
         raise httpx.ConnectError("down")
 
     monkeypatch.setattr(httpx.Client, "get", recording_get)
@@ -262,6 +289,18 @@ async def test_async_pick_region_skips_an_unhealthy_region() -> None:
 
 # The async transport shares the retry policy but not the code path, so each
 # branch needs its own exercise; the sync tests above do not reach it.
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_write_error_is_a_transport_error_and_not_replayed() -> None:
+    route = respx.get(f"{BASE}/list_folders/5G")
+    route.side_effect = httpx.WriteError("reset mid-body")
+    t = AsyncTransport(BASE, "tok")
+    with pytest.raises(errors.TransportError, match="WriteError"):
+        await t.call(build.list_folders("5G"))
+    assert route.call_count == 1
+    await t.aclose()
 
 
 @respx.mock
@@ -357,6 +396,7 @@ async def test_async_pick_region_forwards_timeout_into_each_probe(
         self: httpx.AsyncClient, url: object, **kwargs: object
     ) -> httpx.Response:
         seen.append(kwargs.get("timeout"))
+        assert self.headers["user-agent"] == USER_AGENT
         raise httpx.ConnectError("down")
 
     monkeypatch.setattr(httpx.AsyncClient, "get", recording_get)

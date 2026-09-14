@@ -96,6 +96,10 @@ def _check_kdf(kdf: KdfParams) -> None:
     """Reject unknown algorithms and attacker-controlled costs that would hang."""
     if kdf.algorithm != "argon2id":
         raise MnemonicBlobError(f"unsupported KDF algorithm {kdf.algorithm!r}")
+    # argon2-cffi takes uint32 costs: a negative one is an OverflowError, which
+    # is neither Argon2Error nor ValueError and would escape the wrapper below.
+    if min(kdf.memory_kib, kdf.time_cost, kdf.parallelism) < 1:
+        raise MnemonicBlobError("Argon2 memory_kib, time_cost and parallelism must be positive")
     if kdf.memory_kib > MAX_MEMORY_KIB:
         raise MnemonicBlobError(
             f"Argon2 memory_kib {kdf.memory_kib} exceeds the cap of {MAX_MEMORY_KIB}"
