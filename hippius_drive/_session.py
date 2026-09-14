@@ -64,20 +64,20 @@ class SessionPlan:
         """How many transport chunks the blob occupies; never zero."""
         return self.prepared.transport_chunk_count(self.chunk_size)
 
-    def payloads(self, indices: Iterable[int]) -> list[tuple[int, bytes]]:
-        """Read the given chunks off the blob, in this thread.
+    def payload(self, index: int) -> tuple[int, bytes]:
+        """Read one chunk off the blob, in the calling thread.
 
-        The spooled blob has a single file position, so reading here rather
-        than inside the workers keeps concurrent seeks from interleaving and
-        handing a worker the wrong bytes.
+        The spooled blob has a single file position, so the sender reads here
+        rather than inside the workers, keeping concurrent seeks from handing
+        a worker the wrong bytes.
 
         Args:
-            indices: The chunk indices to read.
+            index: The chunk index to read.
 
         Returns:
-            One ``(index, bytes)`` pair per chunk.
+            The ``(index, bytes)`` pair.
         """
-        return [(index, self.prepared.read_chunk(index, self.chunk_size)) for index in indices]
+        return index, self.prepared.read_chunk(index, self.chunk_size)
 
 
 def _missing(status: models.SessionStatusResult, total: int) -> list[int]:
@@ -154,7 +154,7 @@ def _send(client: Runner, plan: SessionPlan, session_id: str, indices: Iterable[
                 index = next(remaining, None)
                 if index is None:
                     return
-                in_flight.add(pool.submit(put, plan.payloads([index])[0]))
+                in_flight.add(pool.submit(put, plan.payload(index)))
 
         fill()
         while in_flight:
@@ -231,9 +231,9 @@ async def _send_async(
             await slots.acquire()
             tasks = _still_running(tasks)
             # Read from this one task, so the spool's single file position is
-            # never shared (see payloads), but off the loop: an 8 MiB read
+            # never shared (see payload), but off the loop: an 8 MiB read
             # would otherwise stall every other coroutine.
-            payload = (await asyncio.to_thread(plan.payloads, [index]))[0]
+            payload = await asyncio.to_thread(plan.payload, index)
             tasks.append(asyncio.create_task(send(*payload)))
         await asyncio.gather(*tasks)
     except BaseException:

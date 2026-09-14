@@ -34,8 +34,7 @@ PROBE_TIMEOUT = 5.0
 """Seconds to wait for a region's ``/health`` before giving up on it."""
 
 DEFAULT_TIMEOUT = 60.0
-"""Per-attempt connect/read/pool budget in seconds. Writes are uncapped: an
-8 MiB session chunk on a slow uplink would otherwise die at 60s."""
+"""Per-attempt budget in seconds for each phase httpx times separately."""
 
 MAX_ATTEMPTS = 3
 _BACKOFF_SECONDS = (0.5, 1.0, 2.0)
@@ -49,11 +48,18 @@ def _jittered(delay: float) -> float:
     return delay * (0.5 + random.random())  # noqa: S311 - backoff jitter, not crypto
 
 
-def _http_timeout(timeout: float | httpx.Timeout) -> httpx.Timeout:
-    """Apply ``timeout`` to connect/read/pool, never to the request body write."""
+def _http_timeout(timeout: float | httpx.Timeout, *, cap_write: bool) -> httpx.Timeout:
+    """Spread a float over the phases httpx times separately.
+
+    The sync backend re-arms the write timeout on every socket send, so there
+    it is an idle limit a live uplink never trips and the float caps it too.
+    The anyio backend holds one deadline over the whole body, which would kill
+    an 8 MiB session chunk at 60s on a link under ~140 KB/s, so the async
+    transport leaves writes uncapped.
+    """
     if isinstance(timeout, httpx.Timeout):
         return timeout
-    return httpx.Timeout(timeout, write=None)
+    return httpx.Timeout(timeout) if cap_write else httpx.Timeout(timeout, write=None)
 
 
 def prepare(request: Request, token: str) -> dict[str, Any]:
@@ -153,14 +159,15 @@ class Transport:
         Args:
             base_url: The server root, without a trailing slash.
             token: The bearer token.
-            timeout: Connect/read/pool budget in seconds, or a full
-                ``httpx.Timeout``. A float leaves the write side uncapped.
+            timeout: Per-phase budget in seconds, or a full ``httpx.Timeout``.
             sleep: Injected so tests do not actually wait out the backoff.
         """
         self.base_url = base_url.rstrip("/")
         self._token = token
         self._sleep = sleep
-        self._client = httpx.Client(base_url=self.base_url, timeout=_http_timeout(timeout))
+        self._client = httpx.Client(
+            base_url=self.base_url, timeout=_http_timeout(timeout, cap_write=True)
+        )
 
     def send(self, request: Request) -> httpx.Response:
         """Send ``request``, retrying only failures that say nothing about it.
@@ -255,13 +262,16 @@ class AsyncTransport:
             base_url: The server root, without a trailing slash.
             token: The bearer token.
             timeout: Connect/read/pool budget in seconds, or a full
-                ``httpx.Timeout``. A float leaves the write side uncapped.
+                ``httpx.Timeout``. A float leaves the write side uncapped,
+                because anyio applies it to the whole request body.
             sleep: Injected so tests do not actually wait out the backoff.
         """
         self.base_url = base_url.rstrip("/")
         self._token = token
         self._sleep = sleep
-        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=_http_timeout(timeout))
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url, timeout=_http_timeout(timeout, cap_write=False)
+        )
 
     async def send(self, request: Request) -> httpx.Response:
         """Send ``request``, retrying only failures that say nothing about it.

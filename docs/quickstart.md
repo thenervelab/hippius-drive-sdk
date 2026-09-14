@@ -170,8 +170,8 @@ build the transport yourself.
 
 ## Errors
 
-Every failure is a `DriveError` subclass carrying the server's `code`, `message`
-and `status`:
+Every failure the service, the transport or the decrypt step reports is a
+`DriveError` subclass carrying `code`, `message` and `status`:
 
 | Exception | Status | Meaning |
 |---|---|---|
@@ -189,3 +189,7 @@ and `status`:
 `Conflict` during sync is an expected event, not a fault. The transport already
 retries connect failures, read timeouts and 502/503/504 with capped backoff; it
 never retries a 4xx, and never replays a body it has already streamed.
+
+Invalid input is a `ValueError`, raised before any request is made: a bad
+relative path, an over-cap batch delete, a rename with no entries, or a source
+file whose size changed while it was being read.

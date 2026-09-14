@@ -20,6 +20,7 @@ from hippius_drive import _ops, _session, _upload, errors, models
 from hippius_drive._ops import Op
 from hippius_drive._transport import (
     DEFAULT_TIMEOUT,
+    PROBE_TIMEOUT,
     REGIONS,
     AsyncTransport,
     Transport,
@@ -357,6 +358,9 @@ class FileOps:
         Raises:
             Conflict: If ``base_revision_id`` does not match the server.
             QuotaExceeded: If the write is over the account's allowance.
+            ValueError: Before any request, if ``relative_path`` is not a
+                clean POSIX relative path or the source changed size while
+                it was being read.
         """
         spec = UploadSpec(relative_path, base_revision_id, revision_seq)
         return self._put(_upload.PlaintextSource.from_path(local_path), spec)
@@ -497,6 +501,13 @@ class FileOps:
         return self._client.run(_ops.rename_files(identity, entries))
 
 
+def _probe_timeout(timeout: float | httpx.Timeout) -> float:
+    """Bound the region probe by a float client timeout, never above the default."""
+    if isinstance(timeout, httpx.Timeout):
+        return PROBE_TIMEOUT
+    return min(PROBE_TIMEOUT, timeout)
+
+
 class Client:
     """Synchronous Hippius Drive client scoped to one account and folder.
 
@@ -524,15 +535,16 @@ class Client:
             identity: The account address and folder keys.
             server_url: A specific server; otherwise the fastest healthy region
                 is probed once, here, rather than on every request.
-            timeout: Connect/read/pool budget in seconds, or a full
-                ``httpx.Timeout``. A float leaves the write side uncapped so
-                a large upload on a slow link is not killed at 60s.
+            timeout: Per-phase budget in seconds, or a full ``httpx.Timeout``.
+                A float also bounds the region probe, at most ``PROBE_TIMEOUT``.
             transport: A pre-built transport, mainly for tests.
         """
         self.identity = identity
-        self._transport = transport or Transport(
-            server_url if server_url is not None else pick_region(), token, timeout
-        )
+        if transport is None:
+            if server_url is None:
+                server_url = pick_region(timeout=_probe_timeout(timeout))
+            transport = Transport(server_url, token, timeout)
+        self._transport = transport
         self.folders = FolderOps(self)
         self.files = FileOps(self)
         self.summary = SummaryOps(self)
@@ -945,7 +957,8 @@ class AsyncClient:
             identity: The account address and folder keys.
             server_url: The server to talk to; the first region by default.
             timeout: Connect/read/pool budget in seconds, or a full
-                ``httpx.Timeout``. A float leaves the write side uncapped.
+                ``httpx.Timeout``. A float leaves the write side uncapped,
+                because anyio applies it to the whole request body.
             transport: A pre-built transport, mainly for tests.
         """
         self.identity = identity

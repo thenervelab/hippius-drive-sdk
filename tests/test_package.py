@@ -1,5 +1,4 @@
-import sys
-from pathlib import Path
+from importlib import metadata
 
 import hippius_drive
 from hippius_drive.client import (
@@ -11,17 +10,11 @@ from hippius_drive.client import (
     SummaryOps,
 )
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
-_ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_version_matches_pyproject() -> None:
-    data = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert hippius_drive.__version__ == data["project"]["version"]
+def test_the_installed_distribution_carries_the_package_version() -> None:
+    # hatch reads the version out of _version.py; a drift here means the
+    # wheel, the User-Agent and --version would disagree.
+    assert hippius_drive.__version__ == metadata.version("hippius-drive")
 
 
 def test_public_names_are_imported_from_the_package() -> None:

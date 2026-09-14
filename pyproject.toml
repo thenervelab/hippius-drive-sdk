@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hippius-drive"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Python SDK and CLI for Hippius Drive (HCFS): end-to-end encrypted file storage"
 readme = "README.md"
 license = "MIT"
@@ -53,6 +53,9 @@ dev = [
   "pytest-cov==7.1.0",
   "anyio==4.15.1",
 ]
+
+[tool.hatch.version]
+path = "hippius_drive/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["hippius_drive"]

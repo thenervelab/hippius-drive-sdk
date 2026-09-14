@@ -33,24 +33,27 @@ def test_prepare_adds_the_bearer_token() -> None:
     assert kwargs["url"] == "/list_folders/5G"
 
 
-def test_a_float_timeout_leaves_writes_uncapped() -> None:
-    timeout = _http_timeout(60.0)
-    assert timeout.write is None
-    assert timeout.connect == 60.0
-    assert timeout.read == 60.0
-    assert timeout.pool == 60.0
+def test_a_float_timeout_caps_every_phase_unless_told_otherwise() -> None:
+    assert _http_timeout(60.0, cap_write=True) == httpx.Timeout(60.0)
+    assert _http_timeout(60.0, cap_write=False) == httpx.Timeout(60.0, write=None)
 
 
 def test_an_explicit_timeout_is_kept() -> None:
     given = httpx.Timeout(3.0, write=5.0)
-    assert _http_timeout(given) is given
+    assert _http_timeout(given, cap_write=True) is given
+    assert _http_timeout(given, cap_write=False) is given
 
 
-def test_transports_hand_the_uncapped_write_to_httpx() -> None:
+def test_only_the_async_transport_leaves_writes_uncapped() -> None:
+    # httpcore's sync backend re-arms the write timeout per socket send, so a
+    # live uplink never trips it and it stays as stall detection. anyio holds
+    # one deadline over the whole body, so the async side leaves it open.
     t = Transport(BASE, "tok", timeout=7.0)
-    a = AsyncTransport(BASE, "tok", timeout=httpx.Timeout(3.0, write=5.0))
-    assert t._client.timeout == httpx.Timeout(7.0, write=None)
-    assert a._client.timeout == httpx.Timeout(3.0, write=5.0)
+    a = AsyncTransport(BASE, "tok", timeout=7.0)
+    explicit = AsyncTransport(BASE, "tok", timeout=httpx.Timeout(3.0, write=5.0))
+    assert t._client.timeout == httpx.Timeout(7.0)
+    assert a._client.timeout == httpx.Timeout(7.0, write=None)
+    assert explicit._client.timeout == httpx.Timeout(3.0, write=5.0)
     t.close()
 
 

@@ -35,17 +35,6 @@ HEADER_LEN = NONCE_LEN + 4
 FRAME_HEADER_LEN = 4
 MAX_FRAME_LEN = CHUNK_SIZE + TAG_LEN
 
-__all__ = [
-    "CHUNK_SIZE",
-    "chunk_count",
-    "chunk_nonce",
-    "ciphertext_size",
-    "decrypt_bytes",
-    "decrypt_stream",
-    "encrypt_bytes",
-    "encrypt_stream",
-]
-
 
 def chunk_nonce(base_nonce: bytes, index: int) -> bytes:
     """XOR the u64 little-endian chunk index into the first 8 nonce bytes.

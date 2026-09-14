@@ -47,10 +47,10 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
-          echo "pyproject: $version   tag: $TAG"
+          version="$(uv run python -c 'import hippius_drive; print(hippius_drive.__version__)')"
+          echo "package: $version   tag: $TAG"
           if [ "v$version" != "$TAG" ]; then
-            echo "::error::Tag $TAG does not match pyproject version $version." \
+            echo "::error::Tag $TAG does not match package version $version." \
               "Bump the version and re-tag rather than publishing a mismatch."
             exit 1
           fi
