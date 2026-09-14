@@ -37,6 +37,8 @@ def test_a_float_timeout_leaves_writes_uncapped() -> None:
     timeout = _http_timeout(60.0)
     assert timeout.write is None
     assert timeout.connect == 60.0
+    assert timeout.read == 60.0
+    assert timeout.pool == 60.0
 
 
 def test_an_explicit_timeout_is_kept() -> None:
@@ -190,6 +192,21 @@ def test_stream_yields_the_open_response() -> None:
 
 
 @respx.mock
+def test_pick_region_forwards_timeout_into_each_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    def recording_get(self: httpx.Client, url: object, **kwargs: object) -> httpx.Response:
+        seen.append(kwargs.get("timeout"))
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx.Client, "get", recording_get)
+    assert pick_region(timeout=0.01) == REGIONS[0]
+    assert seen == [0.01, 0.01]
+
+
+@respx.mock
 def test_pick_region_skips_an_unhealthy_region() -> None:
     respx.get(f"{REGIONS[0]}/health").mock(return_value=httpx.Response(503))
     respx.get(f"{REGIONS[1]}/health").mock(return_value=httpx.Response(200, json={}))
@@ -327,6 +344,24 @@ async def test_async_pick_region_prefers_the_first_healthy_region() -> None:
     for region in REGIONS:
         respx.get(f"{region}/health").mock(return_value=httpx.Response(200, json={}))
     assert await pick_region_async() == REGIONS[0]
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_pick_region_forwards_timeout_into_each_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    async def recording_get(
+        self: httpx.AsyncClient, url: object, **kwargs: object
+    ) -> httpx.Response:
+        seen.append(kwargs.get("timeout"))
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", recording_get)
+    assert await pick_region_async(timeout=0.01) == REGIONS[0]
+    assert seen == [0.01, 0.01]
 
 
 @pytest.mark.anyio

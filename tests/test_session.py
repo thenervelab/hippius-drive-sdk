@@ -1,3 +1,5 @@
+from collections.abc import Iterable
+
 import httpx
 import pytest
 import respx
@@ -263,6 +265,34 @@ async def test_async_resends_a_chunk_the_status_says_is_missing(identity: Identi
     assert sorted(sent_indices(chunks)) == [*range(total), total - 1]
 
 
+@respx.mock
+def test_send_reads_one_chunk_per_free_worker(
+    client: Client, identity: Identity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A batch of `parallel` would call payloads with 2 indices; loading the
+    # whole blob would call it once with every index. One index per call is
+    # the sliding window.
+    respx.post(f"{BASE}/upload/session").mock(return_value=created())
+    chunk_route().mock(side_effect=chunk_ok)
+    respx.post(f"{BASE}/upload/session/s1/finalize").mock(return_value=finalized())
+    widths: list[int] = []
+    original = _session.SessionPlan.payloads
+
+    def tracking(self: _session.SessionPlan, indices: Iterable[int]) -> list[tuple[int, bytes]]:
+        items = list(indices)
+        widths.append(len(items))
+        return original(self, items)
+
+    monkeypatch.setattr(_session.SessionPlan, "payloads", tracking)
+    with prepared(identity) as up:
+        plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+        mock_status(plan.total_chunks, list(range(plan.total_chunks)))
+        _session.upload_via_session(client, up, plan)
+
+    assert widths
+    assert max(widths) == 1
+
+
 def test_sending_no_chunks_is_a_no_op_rather_than_a_crash(
     client: Client, identity: Identity
 ) -> None:
@@ -282,3 +312,49 @@ async def test_async_sending_no_chunks_is_a_no_op(identity: Identity) -> None:
         with prepared(identity) as up:
             plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK)
             await _session._send_async(client, plan, "s1", [])
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_send_reads_one_chunk_per_free_worker(
+    identity: Identity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    respx.post(f"{BASE}/upload/session").mock(return_value=created())
+    chunk_route().mock(side_effect=chunk_ok)
+    respx.post(f"{BASE}/upload/session/s1/finalize").mock(return_value=finalized())
+    widths: list[int] = []
+    original = _session.SessionPlan.payloads
+
+    def tracking(self: _session.SessionPlan, indices: Iterable[int]) -> list[tuple[int, bytes]]:
+        items = list(indices)
+        widths.append(len(items))
+        return original(self, items)
+
+    monkeypatch.setattr(_session.SessionPlan, "payloads", tracking)
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        with prepared(identity) as up:
+            plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+            mock_status(plan.total_chunks, list(range(plan.total_chunks)))
+            await _session.upload_via_session_async(client, up, plan)
+
+    assert widths
+    assert max(widths) == 1
+
+
+@pytest.mark.anyio
+async def test_async_send_releases_the_slot_if_the_read_fails(
+    identity: Identity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(self: _session.SessionPlan, indices: Iterable[int]) -> list[tuple[int, bytes]]:
+        raise RuntimeError("spool gone")
+
+    monkeypatch.setattr(_session.SessionPlan, "payloads", boom)
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        with prepared(identity) as up:
+            plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+            with pytest.raises(RuntimeError, match="spool gone"):
+                await _session._send_async(client, plan, "s1", [0, 1])

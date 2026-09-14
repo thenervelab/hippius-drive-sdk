@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
@@ -127,23 +127,38 @@ def upload_via_session(
 
 
 def _send(client: Runner, plan: SessionPlan, session_id: str, indices: Iterable[int]) -> None:
-    """Send the given chunk indices, up to ``plan.parallel`` at a time.
+    """Send the given chunk indices, keeping at most ``plan.parallel`` in flight.
 
-    Chunks are read in batches of ``parallel`` rather than all at once, so a
-    multi-gigabyte blob is not duplicated into RAM on top of the spool.
+    The next chunk is read from the spool only when a worker is free, so RAM
+    on top of the spool stays at ``parallel * chunk_size`` without a batch
+    barrier that would idle workers on a slow PUT.
     """
     pending = list(indices)
     if not pending:
         return
     workers = min(plan.parallel, len(pending))
+    remaining = iter(pending)
+    in_flight: set[Future[None]] = set()
 
     def put(item: tuple[int, bytes]) -> None:
         client.run(_ops.upload_chunk(session_id, *item))
 
     with ThreadPoolExecutor(workers) as pool:
-        for offset in range(0, len(pending), plan.parallel):
-            payloads = plan.payloads(pending[offset : offset + plan.parallel])
-            list(pool.map(put, payloads))
+
+        def fill() -> None:
+            while len(in_flight) < workers:
+                index = next(remaining, None)
+                if index is None:
+                    return
+                in_flight.add(pool.submit(put, plan.payloads([index])[0]))
+
+        fill()
+        while in_flight:
+            done, not_done = wait(in_flight, return_when=FIRST_COMPLETED)
+            in_flight = set(not_done)
+            for fut in done:
+                fut.result()
+            fill()
 
 
 async def upload_via_session_async(
@@ -187,16 +202,30 @@ async def upload_via_session_async(
 async def _send_async(
     client: AsyncRunner, plan: SessionPlan, session_id: str, indices: Iterable[int]
 ) -> None:
-    """Send the given chunk indices, up to ``plan.parallel`` in flight."""
+    """Send the given chunk indices, keeping at most ``plan.parallel`` in flight.
+
+    A slot is acquired before the next chunk is read, so a slow PUT does not
+    idle the other workers and the spool is not copied into RAM all at once.
+    """
     pending = list(indices)
     if not pending:
         return
-    limit = asyncio.Semaphore(plan.parallel)
+    slots = asyncio.Semaphore(plan.parallel)
+    tasks: list[asyncio.Task[None]] = []
 
     async def send(index: int, data: bytes) -> None:
-        async with limit:
+        try:
             await client.run(_ops.upload_chunk(session_id, index, data))
+        finally:
+            slots.release()
 
-    for offset in range(0, len(pending), plan.parallel):
-        payloads = plan.payloads(pending[offset : offset + plan.parallel])
-        await asyncio.gather(*(send(index, data) for index, data in payloads))
+    for index in pending:
+        await slots.acquire()
+        try:
+            payload = plan.payloads([index])[0]
+        except BaseException:
+            slots.release()
+            raise
+        tasks.append(asyncio.create_task(send(*payload)))
+
+    await asyncio.gather(*tasks)
