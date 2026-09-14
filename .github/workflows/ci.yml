@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen --all-groups
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run ty check
+
+      - name: Test
+        run: uv run pytest
+
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen --all-groups
+
+      - name: Audit dependencies
+        run: uv run pip-audit
+
+      - name: Audit workflows
+        run: uvx zizmor==1.22.0 --persona=pedantic .github/workflows/
+
+  e2e:
+    name: e2e
+    # Secrets are unavailable to fork pull requests, so the suite would skip
+    # anyway; not starting the job keeps the fork's checks legible.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen --all-groups
+
+      - name: Live round trip
+        env:
+          HIPPIUS_TEST_TOKEN: ${{ secrets.HIPPIUS_TEST_TOKEN }}
+          HIPPIUS_TEST_ACCOUNT_SS58: ${{ secrets.HIPPIUS_TEST_ACCOUNT_SS58 }}
+          HIPPIUS_TEST_MNEMONIC: ${{ secrets.HIPPIUS_TEST_MNEMONIC }}
+        run: |
+          set -euo pipefail
+          # The suite skips itself without credentials, and pytest exits 5 when
+          # that leaves nothing collected. Decide here instead, so a genuine
+          # "no tests collected" still fails once the secrets are configured.
+          if [ -z "$HIPPIUS_TEST_TOKEN" ]; then
+            echo "::notice::live credentials not configured; the live suite did not run"
+            exit 0
+          fi
+          # --no-cov: this run exercises only the live suite, so the coverage
+          # floor in addopts would fail it. The matrix jobs enforce coverage.
+          uv run pytest -m e2e --no-cov
+
+  ci:
+    name: ci
+    # Single required check for branch protection: green only when every
+    # matrix leg and the audit job succeeded.
+    needs: [test, audit, e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail when any dependency did not succeed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

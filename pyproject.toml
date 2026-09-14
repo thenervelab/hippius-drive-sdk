@@ -36,7 +36,7 @@ classifiers = [
 ]
 
 [project.scripts]
-hippius-drive = "hippius_drive.cli:main"
+hippius-drive = "hippius_drive.cli:run"
 
 [project.urls]
 Source = "https://github.com/thenervelab/hippius-drive-sdk"
@@ -50,6 +50,7 @@ dev = [
   "ruff==0.16.7",
   "ty==0.0.80",
   "pip-audit==2.10.1",
+  "pytest-cov==7.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -59,7 +60,11 @@ packages = ["hippius_drive"]
 include = ["hippius_drive", "tests", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
-addopts = "-q -m 'not e2e'"
+# Coverage is measured on every run so a gap shows up in review, not in a
+# quarterly audit. The floor sits just under where the suite actually is:
+# tight enough to catch erosion, loose enough that one new branch does not
+# fail the build before its test lands in the same commit.
+addopts = "-q -m 'not e2e' --cov=hippius_drive --cov-branch --cov-report=term-missing --cov-fail-under=98"
 testpaths = ["tests"]
 markers = ["e2e: hits the live Hippius service; needs HIPPIUS_TEST_TOKEN"]
 filterwarnings = ["error"]
@@ -76,7 +81,15 @@ ignore = ["D203", "D213", "ANN401"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "D", "ANN", "PLR2004", "S311"]
+"tests/*" = ["S101", "D", "ANN", "PLR2004", "S311", "S105", "S106"]
+# N818 wants an Error suffix on every exception. These names are the SDK's
+# published API and read as the condition they carry (`except NotFound:`),
+# so the suffix is dropped deliberately rather than overlooked.
+"hippius_drive/errors.py" = ["N818"]
+# A click command's parameters are its user-facing flags, not an internal call
+# surface, and click passes every one by keyword. The argument-count rules
+# guard against wide internal APIs, which is not what these are.
+"hippius_drive/cli.py" = ["PLR0913", "PLR0917"]
 
 [tool.ruff.lint.pylint]
 max-args = 5

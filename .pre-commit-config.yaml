@@ -1,0 +1,39 @@
+# Run with `prek run` (or `prek run --all-files`); install once with `prek install`.
+# ruff is pinned to the same version as the dev dependency group so a hook and a
+# `uv run ruff` never disagree about what is formatted.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.7
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      # ty and pytest run from the project environment rather than an isolated
+      # hook env: both need the package and its dependencies importable.
+      - id: ty
+        name: ty check
+        entry: uv run ty check
+        language: system
+        pass_filenames: false
+        types_or: [python, pyi]
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        types_or: [python, pyi, toml]
