@@ -95,7 +95,16 @@ jobs:
           HIPPIUS_TEST_TOKEN: ${{ secrets.HIPPIUS_TEST_TOKEN }}
           HIPPIUS_TEST_ACCOUNT_SS58: ${{ secrets.HIPPIUS_TEST_ACCOUNT_SS58 }}
           HIPPIUS_TEST_MNEMONIC: ${{ secrets.HIPPIUS_TEST_MNEMONIC }}
-        run: uv run pytest -m e2e
+        run: |
+          set -euo pipefail
+          # The suite skips itself without credentials, and pytest exits 5 when
+          # that leaves nothing collected. Decide here instead, so a genuine
+          # "no tests collected" still fails once the secrets are configured.
+          if [ -z "$HIPPIUS_TEST_TOKEN" ]; then
+            echo "::notice::live credentials not configured; the live suite did not run"
+            exit 0
+          fi
+          uv run pytest -m e2e
 
   ci:
     name: ci
