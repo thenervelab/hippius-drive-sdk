@@ -117,8 +117,7 @@ class DriveGroup(click.Group):
         except errors.DriveError as exc:
             raise click.ClickException(str(exc)) from exc
         except ValueError as exc:
-            # Covers the SDK's deliberate input rejections (bad relative path,
-            # missing revision_seq, over-cap batch) and DecryptError.
+            # Bad relative path, missing revision_seq, over-cap batch.
             raise click.ClickException(str(exc)) from exc
 
 

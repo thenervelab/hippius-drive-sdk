@@ -144,6 +144,22 @@ def test_every_error_is_a_drive_error() -> None:
         assert issubclass(candidate, errors.DriveError)
 
 
+def test_the_rendered_message_carries_the_status_only_when_there_is_one() -> None:
+    # The CLI prints str(exc) verbatim, so this is user-facing.
+    assert str(errors.NotFound("not_found", "no such file", 404)) == "404 not_found: no such file"
+    assert str(errors.TransportError("ConnectError: boom")) == "transport_error: ConnectError: boom"
+
+
+def test_decrypt_error_is_a_drive_error_with_a_local_code() -> None:
+    exc = errors.DecryptError("frame 0 failed authentication")
+    assert isinstance(exc, errors.DriveError)
+    assert exc.code == "decrypt_error"
+    assert exc.status is None
+    assert not exc.retryable
+    assert "frame 0" in str(exc)
+    assert "transport " not in str(exc)
+
+
 @pytest.mark.parametrize("value", [[1, "x"], [300], [1, None], [-1]])
 def test_a_malformed_byte_array_becomes_none_rather_than_raising(value: object) -> None:
     # Byte fields arrive as JSON int arrays. A server sending something else

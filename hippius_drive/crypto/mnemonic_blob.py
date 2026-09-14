@@ -24,6 +24,12 @@ SALT_LEN = 16
 NONCE_LEN = 24
 KEY_LEN = 32
 _ARGON2_VERSION = 19  # 0x13
+_MIN_SALT_LEN = 8
+# Caps on attacker-controlled blob parameters. The production defaults sit
+# well below these; anything larger is a DoS, not a legitimate writer.
+MAX_MEMORY_KIB = 262_144  # 256 MiB; hcfs default is 128 MiB
+MAX_TIME_COST = 16
+MAX_PARALLELISM = 8
 
 
 class MnemonicBlobError(Exception):
@@ -86,7 +92,30 @@ class SealInputs:
     kdf: KdfParams
 
 
+def _check_kdf(kdf: KdfParams) -> None:
+    """Reject unknown algorithms and attacker-controlled costs that would hang."""
+    if kdf.algorithm != "argon2id":
+        raise MnemonicBlobError(f"unsupported KDF algorithm {kdf.algorithm!r}")
+    # argon2-cffi takes uint32 costs: a negative one is an OverflowError, which
+    # is neither Argon2Error nor ValueError and would escape the wrapper below.
+    if min(kdf.memory_kib, kdf.time_cost, kdf.parallelism) < 1:
+        raise MnemonicBlobError("Argon2 memory_kib, time_cost and parallelism must be positive")
+    if kdf.memory_kib > MAX_MEMORY_KIB:
+        raise MnemonicBlobError(
+            f"Argon2 memory_kib {kdf.memory_kib} exceeds the cap of {MAX_MEMORY_KIB}"
+        )
+    if kdf.time_cost > MAX_TIME_COST:
+        raise MnemonicBlobError(
+            f"Argon2 time_cost {kdf.time_cost} exceeds the cap of {MAX_TIME_COST}"
+        )
+    if kdf.parallelism > MAX_PARALLELISM:
+        raise MnemonicBlobError(
+            f"Argon2 parallelism {kdf.parallelism} exceeds the cap of {MAX_PARALLELISM}"
+        )
+
+
 def _derive_key(passphrase: str, salt: bytes, kdf: KdfParams) -> bytes:
+    _check_kdf(kdf)
     try:
         return hash_secret_raw(
             secret=passphrase.encode(),
@@ -188,10 +217,12 @@ def open_blob(blob: SealedBlob, passphrase: str, expected_ss58: str) -> str:
     salt = _b64(blob.salt, "salt")
     nonce = _b64(blob.nonce, "nonce")
     ciphertext = _b64(blob.ciphertext, "ciphertext")
-    # Checked before the KDF: a corrupt nonce should not cost a 128 MiB Argon2
-    # pass, and libsodium would raise an opaque error on the wrong length.
+    # Checked before the KDF: a corrupt nonce or salt should not cost a 128 MiB
+    # Argon2 pass, and libsodium would raise an opaque error on the wrong length.
     if len(nonce) != NONCE_LEN:
         raise MnemonicBlobError(f"nonce must be {NONCE_LEN} bytes, got {len(nonce)}")
+    if len(salt) < _MIN_SALT_LEN:
+        raise MnemonicBlobError(f"salt must be at least {_MIN_SALT_LEN} bytes, got {len(salt)}")
 
     key = _derive_key(passphrase, salt, blob.kdf)
     try:

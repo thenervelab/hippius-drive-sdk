@@ -21,8 +21,7 @@ phrase, which the SDK can generate for you and which never leaves your machine.
 
 ```python
 from pathlib import Path
-from hippius_drive.client import Client
-from hippius_drive.identity import Identity
+from hippius_drive import Client, Identity
 
 identity = Identity.from_master(master_phrase, "default", account_ss58=account)
 

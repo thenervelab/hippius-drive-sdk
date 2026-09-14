@@ -84,7 +84,10 @@ Both derive from a password you choose, so **that password is what stands
 between an attacker with the file and your files**. The 600,000-iteration count
 matches current OWASP guidance for PBKDF2-SHA256; a blob written with weaker
 parameters still opens, since the parameters travel with it — this SDK reads
-what it is given rather than assuming.
+what it is given rather than assuming. The parameters are also under an
+attacker's control if the file is, so the opener caps them and rejects
+anything larger instead of hanging: PBKDF2 at 10,000,000 iterations, Argon2id
+at 256 MiB, 16 passes and 8 lanes, and only `argon2id`.
 
 The sealed blob binds the account address as associated data, so a server
 swapping one account's blob for another's fails the tag check instead of

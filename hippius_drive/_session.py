@@ -15,9 +15,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar
+from typing import Protocol, TypeVar
 
 from hippius_drive import _ops, models
 from hippius_drive._ops import Op
@@ -40,7 +40,7 @@ class Runner(Protocol):
 class AsyncRunner(Protocol):
     """Async twin of :class:`Runner`."""
 
-    async def run(self, op: Op[T]) -> Any:
+    async def run(self, op: Op[T]) -> T:
         """Send an operation and parse its result."""
         ...
 
@@ -64,20 +64,20 @@ class SessionPlan:
         """How many transport chunks the blob occupies; never zero."""
         return self.prepared.transport_chunk_count(self.chunk_size)
 
-    def payloads(self, indices: Iterable[int]) -> list[tuple[int, bytes]]:
-        """Read the given chunks off the blob, in this thread.
+    def payload(self, index: int) -> tuple[int, bytes]:
+        """Read one chunk off the blob, in the calling thread.
 
-        The spooled blob has a single file position, so reading here rather
-        than inside the workers keeps concurrent seeks from interleaving and
-        handing a worker the wrong bytes.
+        The spooled blob has a single file position, so the sender reads here
+        rather than inside the workers, keeping concurrent seeks from handing
+        a worker the wrong bytes.
 
         Args:
-            indices: The chunk indices to read.
+            index: The chunk index to read.
 
         Returns:
-            One ``(index, bytes)`` pair per chunk.
+            The ``(index, bytes)`` pair.
         """
-        return [(index, self.prepared.read_chunk(index, self.chunk_size)) for index in indices]
+        return index, self.prepared.read_chunk(index, self.chunk_size)
 
 
 def _missing(status: models.SessionStatusResult, total: int) -> list[int]:
@@ -127,12 +127,42 @@ def upload_via_session(
 
 
 def _send(client: Runner, plan: SessionPlan, session_id: str, indices: Iterable[int]) -> None:
-    """Send the given chunk indices, up to ``plan.parallel`` at a time."""
-    payloads = plan.payloads(indices)
-    if not payloads:
+    """Send the given chunk indices, keeping at most ``plan.parallel`` in flight.
+
+    The next chunk is read from the spool only when a worker is free, so RAM
+    on top of the spool stays at ``parallel * chunk_size`` without a batch
+    barrier that would idle workers on a slow PUT.
+
+    After a failure no further chunk is launched, but a blocking httpx request
+    cannot be interrupted, so leaving the pool waits for the up to
+    ``parallel - 1`` PUTs already in flight. The async twin cancels them.
+    """
+    pending = list(indices)
+    if not pending:
         return
-    with ThreadPoolExecutor(min(plan.parallel, len(payloads))) as pool:
-        list(pool.map(lambda item: client.run(_ops.upload_chunk(session_id, *item)), payloads))
+    workers = min(plan.parallel, len(pending))
+    remaining = iter(pending)
+    in_flight: set[Future[None]] = set()
+
+    def put(item: tuple[int, bytes]) -> None:
+        client.run(_ops.upload_chunk(session_id, *item))
+
+    with ThreadPoolExecutor(workers) as pool:
+
+        def fill() -> None:
+            while len(in_flight) < workers:
+                index = next(remaining, None)
+                if index is None:
+                    return
+                in_flight.add(pool.submit(put, plan.payload(index)))
+
+        fill()
+        while in_flight:
+            done, not_done = wait(in_flight, return_when=FIRST_COMPLETED)
+            in_flight = set(not_done)
+            for fut in done:
+                fut.result()
+            fill()
 
 
 async def upload_via_session_async(
@@ -176,14 +206,50 @@ async def upload_via_session_async(
 async def _send_async(
     client: AsyncRunner, plan: SessionPlan, session_id: str, indices: Iterable[int]
 ) -> None:
-    """Send the given chunk indices, up to ``plan.parallel`` in flight."""
-    payloads = plan.payloads(indices)
-    if not payloads:
+    """Send the given chunk indices, keeping at most ``plan.parallel`` in flight.
+
+    A slot is acquired before the next chunk is read, so a slow PUT does not
+    idle the other workers and the spool is not copied into RAM all at once.
+    The first failure stops the launch loop and cancels the siblings in flight:
+    the session is doomed, and a PUT still running would race the caller's
+    ``delete_session`` cleanup and the transport close.
+    """
+    pending = list(indices)
+    if not pending:
         return
-    limit = asyncio.Semaphore(plan.parallel)
+    slots = asyncio.Semaphore(plan.parallel)
+    tasks: list[asyncio.Task[None]] = []
 
     async def send(index: int, data: bytes) -> None:
-        async with limit:
+        try:
             await client.run(_ops.upload_chunk(session_id, index, data))
+        finally:
+            slots.release()
 
-    await asyncio.gather(*(send(index, data) for index, data in payloads))
+    try:
+        for index in pending:
+            await slots.acquire()
+            tasks = _still_running(tasks)
+            # Read from this one task, so the spool's single file position is
+            # never shared (see payload), but off the loop: an 8 MiB read
+            # would otherwise stall every other coroutine.
+            payload = await asyncio.to_thread(plan.payload, index)
+            tasks.append(asyncio.create_task(send(*payload)))
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+def _still_running(tasks: list[asyncio.Task[None]]) -> list[asyncio.Task[None]]:
+    """Drop finished tasks, re-raising the first failure among them.
+
+    Keeps the list at ``parallel`` entries rather than one per chunk, and
+    surfaces a failed PUT at the next launch instead of at the final gather.
+    """
+    for task in tasks:
+        if task.done():
+            task.result()
+    return [task for task in tasks if not task.done()]

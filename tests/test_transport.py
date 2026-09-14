@@ -5,8 +5,10 @@ import respx
 from hippius_drive import errors
 from hippius_drive._transport import (
     REGIONS,
+    USER_AGENT,
     AsyncTransport,
     Transport,
+    _http_timeout,
     pick_region,
     pick_region_async,
     prepare,
@@ -25,8 +27,52 @@ def transport() -> tuple[Transport, list[float]]:
 def test_prepare_adds_the_bearer_token() -> None:
     kwargs = prepare(build.list_folders("5G"), "tok")
     assert kwargs["headers"]["Authorization"] == "Bearer tok"
+    assert kwargs["headers"]["User-Agent"] == USER_AGENT
+    assert USER_AGENT.startswith("hippius-drive/")
     assert kwargs["method"] == "GET"
     assert kwargs["url"] == "/list_folders/5G"
+
+
+def test_a_float_timeout_caps_every_phase_unless_told_otherwise() -> None:
+    assert _http_timeout(60.0, cap_write=True) == httpx.Timeout(60.0)
+    assert _http_timeout(60.0, cap_write=False) == httpx.Timeout(60.0, write=None)
+
+
+def test_an_explicit_timeout_is_kept() -> None:
+    given = httpx.Timeout(3.0, write=5.0)
+    assert _http_timeout(given, cap_write=True) is given
+    assert _http_timeout(given, cap_write=False) is given
+
+
+def test_only_the_async_transport_leaves_writes_uncapped() -> None:
+    # httpcore's sync backend re-arms the write timeout per socket send, so a
+    # live uplink never trips it and it stays as stall detection. anyio holds
+    # one deadline over the whole body, so the async side leaves it open.
+    t = Transport(BASE, "tok", timeout=7.0)
+    a = AsyncTransport(BASE, "tok", timeout=7.0)
+    explicit = AsyncTransport(BASE, "tok", timeout=httpx.Timeout(3.0, write=5.0))
+    assert t._client.timeout == httpx.Timeout(7.0)
+    assert a._client.timeout == httpx.Timeout(7.0, write=None)
+    assert explicit._client.timeout == httpx.Timeout(3.0, write=5.0)
+    t.close()
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.WriteError("reset mid-body"), httpx.RemoteProtocolError("eof"), httpx.PoolTimeout("")],
+)
+def test_a_non_retryable_httpx_failure_is_a_transport_error(failure: httpx.HTTPError) -> None:
+    # A partial request may have landed, so it is not replayed; but the caller
+    # still gets the SDK's error type, never a raw httpx exception.
+    route = respx.get(f"{BASE}/list_folders/5G")
+    route.side_effect = failure
+    t, slept = transport()
+    with pytest.raises(errors.TransportError, match=type(failure).__name__):
+        t.call(build.list_folders("5G"))
+    assert route.call_count == 1
+    assert slept == []
+    t.close()
 
 
 def test_prepare_keeps_an_explicit_empty_body() -> None:
@@ -175,6 +221,22 @@ def test_stream_yields_the_open_response() -> None:
 
 
 @respx.mock
+def test_pick_region_forwards_timeout_into_each_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    def recording_get(self: httpx.Client, url: object, **kwargs: object) -> httpx.Response:
+        seen.append(kwargs.get("timeout"))
+        assert self.headers["user-agent"] == USER_AGENT
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx.Client, "get", recording_get)
+    assert pick_region(timeout=0.01) == REGIONS[0]
+    assert seen == [0.01, 0.01]
+
+
+@respx.mock
 def test_pick_region_skips_an_unhealthy_region() -> None:
     respx.get(f"{REGIONS[0]}/health").mock(return_value=httpx.Response(503))
     respx.get(f"{REGIONS[1]}/health").mock(return_value=httpx.Response(200, json={}))
@@ -230,6 +292,18 @@ async def test_async_pick_region_skips_an_unhealthy_region() -> None:
 
 # The async transport shares the retry policy but not the code path, so each
 # branch needs its own exercise; the sync tests above do not reach it.
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_write_error_is_a_transport_error_and_not_replayed() -> None:
+    route = respx.get(f"{BASE}/list_folders/5G")
+    route.side_effect = httpx.WriteError("reset mid-body")
+    t = AsyncTransport(BASE, "tok")
+    with pytest.raises(errors.TransportError, match="WriteError"):
+        await t.call(build.list_folders("5G"))
+    assert route.call_count == 1
+    await t.aclose()
 
 
 @respx.mock
@@ -312,6 +386,25 @@ async def test_async_pick_region_prefers_the_first_healthy_region() -> None:
     for region in REGIONS:
         respx.get(f"{region}/health").mock(return_value=httpx.Response(200, json={}))
     assert await pick_region_async() == REGIONS[0]
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_pick_region_forwards_timeout_into_each_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    async def recording_get(
+        self: httpx.AsyncClient, url: object, **kwargs: object
+    ) -> httpx.Response:
+        seen.append(kwargs.get("timeout"))
+        assert self.headers["user-agent"] == USER_AGENT
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", recording_get)
+    assert await pick_region_async(timeout=0.01) == REGIONS[0]
+    assert seen == [0.01, 0.01]
 
 
 @pytest.mark.anyio

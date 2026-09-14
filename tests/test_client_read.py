@@ -5,7 +5,7 @@ import pytest
 import respx
 
 from hippius_drive import errors
-from hippius_drive._transport import AsyncTransport, Transport
+from hippius_drive._transport import PROBE_TIMEOUT, AsyncTransport, Transport
 from hippius_drive.client import AsyncClient, Client
 from hippius_drive.identity import Identity
 from hippius_drive.models import BrowseOptions, SearchFilters
@@ -47,6 +47,30 @@ def test_client_never_probes_a_region_when_given_a_server(identity: Identity) ->
     with Client(token="tok", identity=identity, server_url=BASE) as c:
         assert c.server_url == BASE
         assert c.identity.folder_hash == FOLDER
+
+
+@pytest.mark.parametrize(
+    ("timeout", "probe"),
+    [(2.0, 2.0), (120.0, PROBE_TIMEOUT), (httpx.Timeout(2.0), PROBE_TIMEOUT)],
+)
+def test_a_float_client_timeout_bounds_the_region_probe(
+    identity: Identity,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout: float | httpx.Timeout,
+    probe: float,
+) -> None:
+    # A caller who asked for a 2s budget should not sit through a 5s probe per
+    # region, but a generous budget must not stretch the probe past its default.
+    seen: list[float] = []
+
+    def fake_pick_region(*, timeout: float) -> str:
+        seen.append(timeout)
+        return BASE
+
+    monkeypatch.setattr("hippius_drive.client.pick_region", fake_pick_region)
+    with Client(token="tok", identity=identity, timeout=timeout) as c:
+        assert c.server_url == BASE
+    assert seen == [probe]
 
 
 @respx.mock

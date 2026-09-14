@@ -9,6 +9,7 @@ from __future__ import annotations
 
 __all__ = [
     "Conflict",
+    "DecryptError",
     "DriveError",
     "Forbidden",
     "InvalidRequest",
@@ -24,12 +25,16 @@ __all__ = [
 
 
 class DriveError(Exception):
-    """Base class for everything this SDK raises against the service.
+    """Base class for everything this SDK raises that a caller should catch.
+
+    Covers service errors and the local failures a client method can hit
+    (transport, an unreadable body, a ciphertext that will not authenticate).
 
     Attributes:
         code: The machine-readable ``error`` string, or ``unknown``.
         message: The server's human-readable explanation.
-        status: The HTTP status, or ``None`` for transport failures.
+        status: The HTTP status, or ``None`` when the request never landed
+            or the failure was local (decrypt).
         retryable: Whether retrying the same request could succeed.
     """
 
@@ -43,10 +48,27 @@ class DriveError(Exception):
             message: The server's explanation.
             status: The HTTP status, if the request reached the server.
         """
-        super().__init__(f"{status or 'transport'} {code}: {message}")
+        rendered = f"{status} {code}: {message}" if status is not None else f"{code}: {message}"
+        super().__init__(rendered)
         self.code = code
         self.message = message
         self.status = status
+
+
+class DecryptError(DriveError):
+    """Ciphertext is malformed, truncated, or fails authentication.
+
+    Raised by download before any unauthenticated plaintext is yielded. Not
+    retryable: the blob the server returned will fail again.
+    """
+
+    def __init__(self, message: str) -> None:
+        """Build the error.
+
+        Args:
+            message: What was wrong with the blob.
+        """
+        super().__init__("decrypt_error", message, None)
 
 
 class TransportError(DriveError):

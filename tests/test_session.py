@@ -1,8 +1,14 @@
+import asyncio
+import threading
+import time
+from collections.abc import Callable
+
 import httpx
 import pytest
 import respx
 
 from hippius_drive import _session, _upload, errors
+from hippius_drive._ops import Op
 from hippius_drive._transport import AsyncTransport, Transport
 from hippius_drive._upload import TRANSPORT_CHUNK, PlaintextSource, UploadSpec
 from hippius_drive.client import AsyncClient, Client
@@ -68,7 +74,7 @@ def test_plan_splits_the_blob_into_exact_chunks(identity: Identity) -> None:
     with prepared(identity) as up:
         plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK)
         assert plan.total_chunks == -(-up.ciphertext_size // SMALL_CHUNK)
-        payloads = plan.payloads(range(plan.total_chunks))
+        payloads = [plan.payload(index) for index in range(plan.total_chunks)]
         assert b"".join(data for _, data in payloads) == up.blob.read()
         assert all(len(data) == SMALL_CHUNK for _, data in payloads[:-1])
         assert 0 < len(payloads[-1][1]) <= SMALL_CHUNK
@@ -83,7 +89,7 @@ def test_a_blob_of_exactly_one_chunk_needs_no_session(identity: Identity) -> Non
 def test_the_assembled_chunks_reconstruct_a_decryptable_blob(identity: Identity) -> None:
     with prepared(identity) as up:
         plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK)
-        assembled = b"".join(data for _, data in plan.payloads(range(plan.total_chunks)))
+        assembled = b"".join(plan.payload(index)[1] for index in range(plan.total_chunks))
     assert file_cipher.decrypt_bytes(assembled, identity.encryption_key) == b"p" * PLAINTEXT_SIZE
 
 
@@ -263,6 +269,105 @@ async def test_async_resends_a_chunk_the_status_says_is_missing(identity: Identi
     assert sorted(sent_indices(chunks)) == [*range(total), total - 1]
 
 
+def _chunk_index(op: Op[object]) -> int:
+    return int(op.request.path.rsplit("/", 1)[1])
+
+
+def _track_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    reads: list[int] = []
+    original = _session.SessionPlan.payload
+
+    def tracking(self: _session.SessionPlan, index: int) -> tuple[int, bytes]:
+        reads.append(index)
+        return original(self, index)
+
+    monkeypatch.setattr(_session.SessionPlan, "payload", tracking)
+    return reads
+
+
+def _wait_until(condition: Callable[[], bool], timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition never held")
+        time.sleep(0.005)
+
+
+class _GatedRunner:
+    """Every PUT blocks until the test releases it, so the window is visible."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._gates: dict[int, threading.Event] = {}
+
+    def gate(self, index: int) -> threading.Event:
+        with self._lock:
+            return self._gates.setdefault(index, threading.Event())
+
+    def run(self, op: Op[object]) -> None:
+        assert self.gate(_chunk_index(op)).wait(timeout=5)
+
+
+def test_send_reads_a_chunk_only_when_a_worker_is_free(
+    identity: Identity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The RAM bound on top of the spool is `parallel` chunks: no read happens
+    # until a PUT has finished, and one finished PUT lets exactly one more in.
+    reads = _track_reads(monkeypatch)
+    runner = _GatedRunner()
+    with prepared(identity, SMALL_CHUNK * 6) as up:
+        plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+        total = plan.total_chunks
+        worker = threading.Thread(
+            target=_session._send, args=(runner, plan, "s1", range(total)), daemon=True
+        )
+        worker.start()
+        _wait_until(lambda: len(reads) == 2)
+        time.sleep(0.05)
+        assert reads == [0, 1]
+
+        runner.gate(0).set()
+        _wait_until(lambda: len(reads) == 3)
+        time.sleep(0.05)
+        assert reads == [0, 1, 2]
+
+        for index in range(1, total):
+            runner.gate(index).set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    assert reads == list(range(total))
+
+
+@respx.mock
+def test_sync_failure_stops_the_window_and_still_deletes_the_session(
+    client: Client, identity: Identity
+) -> None:
+    # Chunk 0 is rejected while chunk 1 is in flight. The window must not be
+    # topped up after the failure, and the cleanup must still run.
+    respx.post(f"{BASE}/upload/session").mock(return_value=created())
+    chunks = chunk_route()
+
+    def reject_first(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/0"):
+            return httpx.Response(
+                401, json={"Error": {"error": "unauthorized", "message": "token rejected"}}
+            )
+        return chunk_ok(request)
+
+    chunks.side_effect = reject_first
+    deleted = respx.delete(f"{BASE}/upload/session/s1").mock(
+        return_value=httpx.Response(200, json={"Success": None})
+    )
+    with prepared(identity, SMALL_CHUNK * 8) as up:
+        plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+        with pytest.raises(errors.Unauthorized):
+            _session.upload_via_session(client, up, plan)
+
+    # At most the in-flight sibling, plus one top-up if it finished first.
+    assert len(chunks.calls) <= plan.parallel + 1
+    assert deleted.called
+
+
 def test_sending_no_chunks_is_a_no_op_rather_than_a_crash(
     client: Client, identity: Identity
 ) -> None:
@@ -282,3 +387,105 @@ async def test_async_sending_no_chunks_is_a_no_op(identity: Identity) -> None:
         with prepared(identity) as up:
             plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK)
             await _session._send_async(client, plan, "s1", [])
+
+
+class _AsyncGatedRunner:
+    """Async twin of :class:`_GatedRunner`."""
+
+    def __init__(self) -> None:
+        self._gates: dict[int, asyncio.Event] = {}
+
+    def gate(self, index: int) -> asyncio.Event:
+        return self._gates.setdefault(index, asyncio.Event())
+
+    async def run(self, op: Op[object]) -> None:
+        await self.gate(_chunk_index(op)).wait()
+
+
+async def _settle(condition: Callable[[], bool], timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition never held")
+        await asyncio.sleep(0.005)
+    await asyncio.sleep(0.05)
+
+
+@pytest.mark.anyio
+async def test_async_send_reads_a_chunk_only_when_a_slot_is_free(
+    identity: Identity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads = _track_reads(monkeypatch)
+    runner = _AsyncGatedRunner()
+    with prepared(identity, SMALL_CHUNK * 6) as up:
+        plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+        total = plan.total_chunks
+        sender = asyncio.create_task(_session._send_async(runner, plan, "s1", range(total)))
+        await _settle(lambda: len(reads) == 2)
+        assert reads == [0, 1]
+
+        runner.gate(0).set()
+        await _settle(lambda: len(reads) == 3)
+        assert reads == [0, 1, 2]
+
+        for index in range(1, total):
+            runner.gate(index).set()
+        await asyncio.wait_for(sender, timeout=5)
+    assert reads == list(range(total))
+
+
+@pytest.mark.anyio
+async def test_async_send_releases_the_slot_if_the_read_fails(
+    identity: Identity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(self: _session.SessionPlan, index: int) -> tuple[int, bytes]:
+        raise RuntimeError("spool gone")
+
+    monkeypatch.setattr(_session.SessionPlan, "payload", boom)
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        with prepared(identity) as up:
+            plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+            with pytest.raises(RuntimeError, match="spool gone"):
+                await _session._send_async(client, plan, "s1", [0, 1])
+
+
+class _StallingRunner:
+    """Fails the first chunk; every other chunk blocks until cancelled."""
+
+    def __init__(self) -> None:
+        self.started: list[int] = []
+        self.cancelled: list[int] = []
+
+    async def run(self, op: Op[object]) -> None:
+        index = _chunk_index(op)
+        self.started.append(index)
+        if index == 0:
+            raise errors.Unauthorized("unauthorized", "token rejected", 401)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.append(index)
+            raise
+
+
+@pytest.mark.anyio
+async def test_async_send_stops_launching_chunks_after_one_fails(identity: Identity) -> None:
+    # Once a PUT has failed the session is doomed, so reading and sending the
+    # rest of the spool is wasted bandwidth. Any sibling already in flight
+    # must be cancelled before the error propagates, or it would race the
+    # delete_session cleanup and the transport close.
+    runner = _StallingRunner()
+    tasks_before = asyncio.all_tasks()
+    with prepared(identity, SMALL_CHUNK * 8) as up:
+        plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)
+        with pytest.raises(errors.Unauthorized):
+            await asyncio.wait_for(
+                _session._send_async(runner, plan, "s1", range(plan.total_chunks)), timeout=5
+            )
+
+    assert runner.started[0] == 0
+    assert len(runner.started) <= plan.parallel
+    assert runner.cancelled == runner.started[1:]
+    assert asyncio.all_tasks() == tasks_before
