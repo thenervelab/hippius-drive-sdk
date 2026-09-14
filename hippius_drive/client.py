@@ -7,10 +7,12 @@ differ only in whether they await the transport. Namespaces (``folders``,
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from tempfile import SpooledTemporaryFile
 from types import TracebackType
-from typing import TypeVar
+from typing import IO, Any, TypeVar
 
 import httpx
 
@@ -35,36 +37,97 @@ DEFAULT_PAGE_SIZE = 100
 """Page size ``iter_state`` uses; large enough to keep round trips down."""
 
 
-def _download_info(response: httpx.Response) -> models.DownloadInfo:
-    """Read the metadata headers that ride along with a download.
+HTTP_ERROR_FLOOR = 400
+"""Statuses at or above this carry a JSON error body, not ciphertext."""
 
-    Raises the typed error first when the status is not a success: the body of
-    an error response is JSON, not ciphertext.
-    """
-    if response.status_code >= 400:  # noqa: PLR2004 - HTTP error boundary
-        response.read()
-        raise_for = (
-            response.json()
-            if response.headers.get("content-type", "").startswith("application/json")
-            else response.text
-        )
-        parse_envelope(response.status_code, raise_for)
-    revision = response.headers.get("X-Revision-Id")
+
+def _headers_info(response: httpx.Response) -> models.DownloadInfo:
+    """Read the metadata headers that ride along with a successful download."""
     return models.DownloadInfo(
         size_bytes=int(response.headers.get("X-Size-Bytes", 0)),
-        revision_id=revision,
+        revision_id=response.headers.get("X-Revision-Id"),
         revision_seq=int(response.headers.get("X-Revision-Seq", 0)),
     )
 
 
-async def _collect(response: httpx.Response) -> list[bytes]:
-    """Drain an async streaming body into chunks the sync frame decoder can pull.
+def _raise_download_error(status: int, body: bytes, content_type: str) -> None:
+    """Turn an error body read off a download stream into the typed exception."""
+    if content_type.startswith("application/json"):
+        try:
+            parsed: Any = json.loads(body)
+        except ValueError:
+            parsed = body.decode(errors="replace")
+    else:
+        parsed = body.decode(errors="replace")
+    parse_envelope(status, parsed)
 
-    The decoder is a plain generator, so it cannot await. Chunks are collected
-    rather than the whole body concatenated, which keeps peak memory at one
-    copy instead of two.
+
+def _download_info(response: httpx.Response) -> models.DownloadInfo:
+    """Return the download metadata, or raise the typed error the body carries.
+
+    The error has to be handled before anything tries to decrypt: a 404's body
+    is JSON, and feeding it to the frame decoder would report a corrupt file
+    instead of a missing one.
+
+    Args:
+        response: An open streaming response.
+
+    Returns:
+        The size and revision the server reported.
+
+    Raises:
+        DriveError: For any error status.
     """
-    return [chunk async for chunk in response.aiter_bytes()]
+    if response.status_code >= HTTP_ERROR_FLOOR:
+        response.read()
+        _raise_download_error(
+            response.status_code, response.content, response.headers.get("content-type", "")
+        )
+    return _headers_info(response)
+
+
+async def _download_info_async(response: httpx.Response) -> models.DownloadInfo:
+    """Async twin of :func:`_download_info`.
+
+    Separate because reading an error body off an async response needs
+    ``aread``; the sync ``read`` raises on an async stream, which would have
+    turned every async 404 into an unrelated runtime error.
+
+    Args:
+        response: An open streaming response.
+
+    Returns:
+        The size and revision the server reported.
+
+    Raises:
+        DriveError: For any error status.
+    """
+    if response.status_code >= HTTP_ERROR_FLOOR:
+        await response.aread()
+        _raise_download_error(
+            response.status_code, response.content, response.headers.get("content-type", "")
+        )
+    return _headers_info(response)
+
+
+async def _spool_body(response: httpx.Response) -> IO[bytes]:
+    """Drain an async streaming body into a spooled file, rewound for reading.
+
+    The frame decoder is a plain generator and cannot await, so the body has
+    to land somewhere the decoder can pull from synchronously. A spooled file
+    keeps small downloads in memory and caps large ones at one temp file
+    rather than one heap copy.
+    """
+    # Closed by the caller once the decode finishes.
+    spool: IO[bytes] = SpooledTemporaryFile(max_size=_upload.SPOOL_MAX)  # noqa: SIM115
+    try:
+        async for chunk in response.aiter_bytes():
+            spool.write(chunk)
+    except BaseException:
+        spool.close()
+        raise
+    spool.seek(0)
+    return spool
 
 
 def _rename_entry(identity: Identity, spec: RenameSpec) -> models.SingleRename:
@@ -775,21 +838,24 @@ class AsyncFileOps:
         async with self._client.transport.stream(
             _ops.download(self._client.identity, file_id)
         ) as response:
-            info = _download_info(response)
-            try:
-                with part.open("wb") as out:
-                    for chunk in file_cipher.decrypt_stream(
-                        _upload.reader_over(iter(await _collect(response))), key
-                    ):
-                        out.write(chunk)
-            except BaseException:
-                part.unlink(missing_ok=True)
-                raise
+            info = await _download_info_async(response)
+            spool = await _spool_body(response)
+        try:
+            with part.open("wb") as out:
+                for chunk in file_cipher.decrypt_stream(spool, key):
+                    out.write(chunk)
+        except BaseException:
+            part.unlink(missing_ok=True)
+            raise
+        finally:
+            spool.close()
         part.replace(dest)
         return info
 
     async def get_bytes(self, file_id: str) -> bytes:
         """Download and decrypt a file into memory.
+
+        Use :meth:`get` for anything large; this holds the whole plaintext.
 
         Args:
             file_id: 64-char hex ``path_hash``.
@@ -801,9 +867,12 @@ class AsyncFileOps:
         async with self._client.transport.stream(
             _ops.download(self._client.identity, file_id)
         ) as response:
-            _download_info(response)
-            reader = _upload.reader_over(iter(await _collect(response)))
-            return b"".join(file_cipher.decrypt_stream(reader, key))
+            await _download_info_async(response)
+            spool = await _spool_body(response)
+        try:
+            return b"".join(file_cipher.decrypt_stream(spool, key))
+        finally:
+            spool.close()
 
     async def delete(self, file_id: str) -> models.DeleteResult:
         """Remove one file. Immediate, with no undo.

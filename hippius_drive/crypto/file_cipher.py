@@ -19,7 +19,7 @@ from __future__ import annotations
 import io
 import os
 from collections.abc import Iterator
-from typing import BinaryIO
+from typing import IO
 
 from nacl import bindings
 from nacl.exceptions import CryptoError
@@ -81,7 +81,7 @@ def ciphertext_size(plaintext_size: int) -> int:
     return HEADER_LEN + frames * (FRAME_HEADER_LEN + TAG_LEN) + plaintext_size
 
 
-def _read_upto(reader: BinaryIO, size: int) -> bytes:
+def _read_upto(reader: IO[bytes], size: int) -> bytes:
     """Read up to ``size`` bytes, looping over short reads until EOF."""
     parts: list[bytes] = []
     remaining = size
@@ -95,7 +95,7 @@ def _read_upto(reader: BinaryIO, size: int) -> bytes:
 
 
 def encrypt_stream(
-    reader: BinaryIO,
+    reader: IO[bytes],
     key: bytes,
     plaintext_size: int,
     base_nonce: bytes | None = None,
@@ -153,14 +153,14 @@ def encrypt_bytes(plaintext: bytes, key: bytes, base_nonce: bytes | None = None)
     return b"".join(encrypt_stream(io.BytesIO(plaintext), key, len(plaintext), base_nonce))
 
 
-def _read_exact(reader: BinaryIO, size: int) -> bytes:
+def _read_exact(reader: IO[bytes], size: int) -> bytes:
     data = _read_upto(reader, size)
     if len(data) != size:
         raise DecryptError(f"truncated ciphertext: wanted {size} bytes, got {len(data)}")
     return data
 
 
-def decrypt_stream(reader: BinaryIO, key: bytes) -> Iterator[bytes]:
+def decrypt_stream(reader: IO[bytes], key: bytes) -> Iterator[bytes]:
     """Yield plaintext frame by frame, authenticating each before it is yielded.
 
     Nothing unauthenticated ever reaches the caller, so a partially written

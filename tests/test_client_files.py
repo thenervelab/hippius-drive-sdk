@@ -8,9 +8,9 @@ import respx
 from nacl.signing import VerifyKey
 
 from hippius_drive import errors
-from hippius_drive._transport import Transport
+from hippius_drive._transport import AsyncTransport, Transport
 from hippius_drive._upload import TRANSPORT_CHUNK
-from hippius_drive.client import Client
+from hippius_drive.client import AsyncClient, Client
 from hippius_drive.crypto import file_cipher, hashes
 from hippius_drive.identity import Identity, tos_text
 from hippius_drive.models import Manifest
@@ -313,3 +313,81 @@ def test_finalize_carries_content_length_zero(client: Client) -> None:
 
     client.files.put_bytes(b"q" * (TRANSPORT_CHUNK + 1), "big.bin")
     assert finalize.calls.last.request.headers["content-length"] == "0"
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_get_round_trips_to_disk(identity: Identity, tmp_path: Path) -> None:
+    plaintext = b"y" * (file_cipher.CHUNK_SIZE + 9)
+    blob = file_cipher.encrypt_bytes(plaintext, identity.encryption_key)
+    file_id = hashes.path_hash("a.bin").hex()
+    respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
+        return_value=httpx.Response(200, content=blob, headers={"X-Size-Bytes": "262153"})
+    )
+    dest = tmp_path / "out" / "a.bin"
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        info = await client.files.get(file_id, dest)
+        assert await client.files.get_bytes(file_id) == plaintext
+
+    assert dest.read_bytes() == plaintext
+    assert info.size_bytes == 262153
+    assert not dest.with_name("a.bin.part").exists()
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_get_raises_the_typed_error_for_a_json_body(
+    identity: Identity, tmp_path: Path
+) -> None:
+    # Reading an error body off an async stream needs aread(); the sync read()
+    # raises, which would turn every async 404 into an unrelated RuntimeError.
+    file_id = hashes.path_hash("a.bin").hex()
+    respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
+        return_value=httpx.Response(404, json={"Error": {"error": "not_found", "message": "no"}})
+    )
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        with pytest.raises(errors.NotFound):
+            await client.files.get(file_id, tmp_path / "a.bin")
+        with pytest.raises(errors.NotFound):
+            await client.files.get_bytes(file_id)
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_get_leaves_nothing_behind_when_a_frame_is_tampered(
+    identity: Identity, tmp_path: Path
+) -> None:
+    blob = bytearray(file_cipher.encrypt_bytes(b"y" * 1024, identity.encryption_key))
+    blob[-1] ^= 0xFF
+    file_id = hashes.path_hash("a.bin").hex()
+    respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
+        return_value=httpx.Response(200, content=bytes(blob))
+    )
+    dest = tmp_path / "a.bin"
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        with pytest.raises(file_cipher.DecryptError):
+            await client.files.get(file_id, dest)
+    assert not dest.exists()
+    assert not dest.with_name("a.bin.part").exists()
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_put_and_delete(identity: Identity) -> None:
+    respx.post(f"{BASE}/upload").mock(return_value=upload_ok(6))
+    file_id = hashes.path_hash("a.bin").hex()
+    respx.delete(f"{BASE}/delete/{SS58}/{FOLDER}/{file_id}").mock(
+        return_value=httpx.Response(200, json={"Success": {"status": "deleted"}})
+    )
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        result = await client.files.put_bytes(b"hello", "a.bin")
+        assert result.revision_id == bytes([6] * 32)
+        assert (await client.files.delete(file_id)).status == "deleted"

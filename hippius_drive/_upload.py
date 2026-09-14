@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
 from types import TracebackType
-from typing import IO, TYPE_CHECKING, BinaryIO
+from typing import IO, TYPE_CHECKING
 
 import blake3
 
@@ -48,7 +48,7 @@ class PlaintextSource:
         size: Exact plaintext length, which fixes the frame count.
     """
 
-    open: Callable[[], BinaryIO]
+    open: Callable[[], IO[bytes]]
     size: int
 
     @classmethod
@@ -293,7 +293,7 @@ class IteratorStream(io.RawIOBase):
         return taken
 
 
-def reader_over(chunks: Iterator[bytes]) -> BinaryIO:
+def reader_over(chunks: Iterator[bytes]) -> IO[bytes]:
     """Wrap a chunk iterator in a buffered binary reader.
 
     Args:
