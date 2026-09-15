@@ -14,7 +14,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import Any
 from urllib.parse import urlparse
 
@@ -266,13 +266,15 @@ class Transport:
         try:
             yield response
         except httpx.HTTPError as exc:
-            cm.__exit__(*sys.exc_info())
+            with suppress(errors.TransportError):
+                _exit_sync_stream(cm, *sys.exc_info())
             raise _transport_error(exc) from exc
         except BaseException:
-            cm.__exit__(*sys.exc_info())
+            with suppress(httpx.HTTPError):
+                cm.__exit__(*sys.exc_info())
             raise
         else:
-            cm.__exit__(None, None, None)
+            _exit_sync_stream(cm)
 
     def close(self) -> None:
         """Close the underlying connection pool."""
@@ -380,13 +382,15 @@ class AsyncTransport:
         try:
             yield response
         except httpx.HTTPError as exc:
-            await cm.__aexit__(*sys.exc_info())
+            with suppress(errors.TransportError):
+                await _exit_async_stream(cm, *sys.exc_info())
             raise _transport_error(exc) from exc
         except BaseException:
-            await cm.__aexit__(*sys.exc_info())
+            with suppress(httpx.HTTPError):
+                await cm.__aexit__(*sys.exc_info())
             raise
         else:
-            await cm.__aexit__(None, None, None)
+            await _exit_async_stream(cm)
 
     async def aclose(self) -> None:
         """Close the underlying connection pool."""
@@ -395,6 +399,44 @@ class AsyncTransport:
 
 def _keep_stream(attempt: int, attempts: int, status: int) -> bool:
     return attempt == attempts or status not in _RETRYABLE_STATUSES
+
+
+def _exit_sync_stream(cm: Any, *exc_info: Any) -> None:
+    """Close a sync httpx stream; map close-time HTTPError to TransportError."""
+    if not exc_info:
+        exc_info = (None, None, None)
+    try:
+        cm.__exit__(*exc_info)
+    except httpx.HTTPError as exc:
+        raise _transport_error(exc) from exc
+
+
+async def _exit_async_stream(cm: Any, *exc_info: Any) -> None:
+    """Async twin of :func:`_exit_sync_stream`."""
+    if not exc_info:
+        exc_info = (None, None, None)
+    try:
+        await cm.__aexit__(*exc_info)
+    except httpx.HTTPError as exc:
+        raise _transport_error(exc) from exc
+
+
+def _discard_sync_stream(cm: Any) -> Exception | None:
+    """Close a stream we will not yield. Close errors are retried; the GET is safe."""
+    try:
+        cm.__exit__(None, None, None)
+    except httpx.HTTPError as exc:
+        return exc
+    return None
+
+
+async def _discard_async_stream(cm: Any) -> Exception | None:
+    """Async twin of :func:`_discard_sync_stream`."""
+    try:
+        await cm.__aexit__(None, None, None)
+    except httpx.HTTPError as exc:
+        return exc
+    return None
 
 
 def _acquire_sync_stream(
@@ -417,7 +459,9 @@ def _acquire_sync_stream(
         else:
             if _keep_stream(attempt, attempts, response.status_code):
                 return cm, response
-            cm.__exit__(None, None, None)
+            discarded = _discard_sync_stream(cm)
+            if discarded is not None:
+                last = discarded
         if attempt < attempts:
             sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
     assert last is not None  # noqa: S101 - a kept stream returns
@@ -444,7 +488,9 @@ async def _acquire_async_stream(
         else:
             if _keep_stream(attempt, attempts, response.status_code):
                 return cm, response
-            await cm.__aexit__(None, None, None)
+            discarded = await _discard_async_stream(cm)
+            if discarded is not None:
+                last = discarded
         if attempt < attempts:
             await sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
     assert last is not None  # noqa: S101 - a kept stream returns

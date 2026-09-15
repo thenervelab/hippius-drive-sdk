@@ -51,6 +51,8 @@ def test_empty_token_is_rejected_before_region_probe(
     monkeypatch.setattr("hippius_drive.client.pick_region", boom)
     with pytest.raises(ValueError, match="token"):
         Client(token="", identity=identity)
+    with pytest.raises(ValueError, match="token"):
+        Client(token="   ", identity=identity)
 
 
 def test_client_rejects_a_non_positive_timeout(identity: Identity) -> None:

@@ -385,6 +385,112 @@ async def test_async_read_timeout_after_the_stream_opens_is_not_retried() -> Non
 
 
 @respx.mock
+def test_a_close_timeout_after_the_body_is_a_transport_error() -> None:
+    @contextmanager
+    def boom_close(**_kwargs: object) -> Any:
+        class Resp:
+            status_code = 200
+
+            def iter_bytes(self) -> Any:
+                return iter((b"x",))
+
+        yield Resp()
+        raise httpx.ReadTimeout("close stalled")
+
+    t, slept = transport()
+    object.__setattr__(t._client, "stream", boom_close)
+    with (
+        pytest.raises(errors.TransportError, match="ReadTimeout"),
+        t.stream(build.download("5G", "abc", "ff" * 32)) as response,
+    ):
+        list(response.iter_bytes())
+    assert slept == []
+    t.close()
+
+
+@respx.mock
+def test_a_close_timeout_on_a_discarded_503_is_retried() -> None:
+    opened = {"n": 0}
+
+    @contextmanager
+    def flaky(**_kwargs: object) -> Any:
+        opened["n"] += 1
+
+        class Resp:
+            status_code = 503 if opened["n"] == 1 else 200
+
+            def iter_bytes(self) -> Any:
+                return iter((b"blob",))
+
+        yield Resp()
+        if opened["n"] == 1:
+            raise httpx.ReadTimeout("close stalled")
+
+    t, slept = transport()
+    object.__setattr__(t._client, "stream", flaky)
+    with t.stream(build.download("5G", "abc", "ff" * 32)) as response:
+        assert b"".join(response.iter_bytes()) == b"blob"
+    assert opened["n"] == 2
+    assert slept
+    t.close()
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_close_timeout_on_a_discarded_503_is_retried() -> None:
+    opened = {"n": 0}
+
+    @asynccontextmanager
+    async def flaky(**_kwargs: object) -> Any:
+        opened["n"] += 1
+
+        class Resp:
+            status_code = 503 if opened["n"] == 1 else 200
+
+            def iter_bytes(self) -> Any:
+                return iter((b"blob",))
+
+        yield Resp()
+        if opened["n"] == 1:
+            raise httpx.ReadTimeout("close stalled")
+
+    async def nosleep(_seconds: float) -> None:
+        return None
+
+    t = AsyncTransport(BASE, "tok", sleep=nosleep)
+    object.__setattr__(t._client, "stream", flaky)
+    async with t.stream(build.download("5G", "abc", "ff" * 32)) as response:
+        assert b"".join(response.iter_bytes()) == b"blob"
+    assert opened["n"] == 2
+    await t.aclose()
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_close_timeout_after_the_body_is_a_transport_error() -> None:
+    @asynccontextmanager
+    async def boom_close(**_kwargs: object) -> Any:
+        class Resp:
+            status_code = 200
+
+            def iter_bytes(self) -> Any:
+                return iter((b"x",))
+
+        yield Resp()
+        raise httpx.ReadTimeout("close stalled")
+
+    async def nosleep(_seconds: float) -> None:
+        return None
+
+    t = AsyncTransport(BASE, "tok", sleep=nosleep)
+    object.__setattr__(t._client, "stream", boom_close)
+    with pytest.raises(errors.TransportError, match="ReadTimeout"):
+        async with t.stream(build.download("5G", "abc", "ff" * 32)) as response:
+            list(response.iter_bytes())
+    await t.aclose()
+
+
+@respx.mock
 def test_finalize_is_not_retried_on_502() -> None:
     # hcfs-client does not retry finalize. A 502 after commit must not POST twice.
     route = respx.post(f"{BASE}/upload/session/s1/finalize").mock(

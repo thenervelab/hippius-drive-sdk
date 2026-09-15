@@ -243,6 +243,29 @@ def test_get_forces_0600_on_a_preexisting_part_file(
         assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform has no O_NOFOLLOW")
+@respx.mock
+def test_get_does_not_follow_a_part_symlink(
+    client: Client, identity: Identity, tmp_path: Path
+) -> None:
+    plaintext = b"y" * 64
+    blob = file_cipher.encrypt_bytes(plaintext, identity.encryption_key)
+    file_id = client.files.file_id("a.bin")
+    respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
+        return_value=httpx.Response(200, content=blob, headers={"X-Size-Bytes": "64"})
+    )
+    dest = tmp_path / "a.bin"
+    target = tmp_path / "secret.bin"
+    target.write_bytes(b"keep-me")
+    part = dest.with_name("a.bin.part")
+    part.symlink_to(target)
+    with pytest.raises(OSError):
+        client.files.get(file_id, dest)
+    assert target.read_bytes() == b"keep-me"
+    assert not part.exists()
+    assert not dest.exists()
+
+
 @respx.mock
 def test_get_leaves_nothing_behind_when_a_frame_is_tampered(
     client: Client, identity: Identity, tmp_path: Path
