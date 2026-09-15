@@ -224,6 +224,26 @@ def test_get_writes_the_plaintext_and_reports_the_headers(
 
 
 @respx.mock
+def test_get_forces_0600_on_a_preexisting_part_file(
+    client: Client, identity: Identity, tmp_path: Path
+) -> None:
+    plaintext = b"y" * 64
+    blob = file_cipher.encrypt_bytes(plaintext, identity.encryption_key)
+    file_id = client.files.file_id("a.bin")
+    respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
+        return_value=httpx.Response(200, content=blob, headers={"X-Size-Bytes": "64"})
+    )
+    dest = tmp_path / "a.bin"
+    part = dest.with_name("a.bin.part")
+    part.write_bytes(b"stale")
+    part.chmod(0o644)
+    client.files.get(file_id, dest)
+    assert dest.read_bytes() == plaintext
+    if os.name == "posix":
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+
+
+@respx.mock
 def test_get_leaves_nothing_behind_when_a_frame_is_tampered(
     client: Client, identity: Identity, tmp_path: Path
 ) -> None:

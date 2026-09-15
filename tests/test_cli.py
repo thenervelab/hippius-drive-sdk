@@ -97,7 +97,7 @@ def test_init_rejects_an_invalid_phrase(tmp_path: Path) -> None:
 
 @respx.mock
 def test_whoami_reports_the_derived_identity(env: dict[str, str]) -> None:
-    respx.get(f"{BASE}/list_folders/{SS58}").mock(
+    route = respx.get(f"{BASE}/list_folders/{SS58}").mock(
         return_value=httpx.Response(200, json={"Success": {"folders": []}})
     )
     output = run(["whoami"], env).output
@@ -105,6 +105,7 @@ def test_whoami_reports_the_derived_identity(env: dict[str, str]) -> None:
     assert FOLDER in output
     assert kdf.folder_hash("default") in output
     assert "accepted for this account" in output
+    assert route.call_count == 1
 
 
 @respx.mock
@@ -117,6 +118,25 @@ def test_whoami_surfaces_a_403(env: dict[str, str]) -> None:
     result = run(["whoami"], env)
     assert result.exit_code == 1
     assert "forbidden" in result.output
+
+
+@respx.mock
+def test_whoami_unlocks_the_mnemonic_once(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    respx.get(f"{BASE}/list_folders/{SS58}").mock(
+        return_value=httpx.Response(200, json={"Success": {"folders": []}})
+    )
+    loads: list[int] = []
+    real = mnemonic_store.load
+
+    def counting(path: Path, password: str) -> str:
+        loads.append(1)
+        return real(path, password)
+
+    monkeypatch.setattr("hippius_drive.cli.mnemonic_store.load", counting)
+    assert run(["whoami"], env).exit_code == 0
+    assert loads == [1]
 
 
 def test_whoami_without_an_account_explains_where_it_comes_from(
@@ -233,6 +253,15 @@ def test_ls_notes_when_a_page_is_truncated(env: dict[str, str]) -> None:
     result = run(["ls"], env)
     assert result.exit_code == 0
     assert "more entries not shown" in result.output
+
+
+@respx.mock
+def test_ls_strips_a_trailing_slash(env: dict[str, str]) -> None:
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
+        return_value=httpx.Response(200, json={"Success": {"folders": [], "files": []}})
+    )
+    assert run(["ls", "docs/"], env).exit_code == 0
+    assert dict(route.calls.last.request.url.params)["path"] == "docs"
 
 
 @respx.mock
@@ -410,6 +439,7 @@ def test_search_notes_when_results_are_truncated(env: dict[str, str]) -> None:
     result = run(["search", "report"], env)
     assert result.exit_code == 0
     assert "more hits not shown" in result.output
+    assert "offset" not in result.output
 
 
 @respx.mock

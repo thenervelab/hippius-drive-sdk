@@ -42,6 +42,17 @@ def client(identity: Identity) -> Client:
     return Client(token="tok", identity=identity, transport=Transport(BASE, "tok"))
 
 
+def test_empty_token_is_rejected_before_region_probe(
+    identity: Identity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(**_kwargs: object) -> str:
+        raise AssertionError("must not probe")
+
+    monkeypatch.setattr("hippius_drive.client.pick_region", boom)
+    with pytest.raises(ValueError, match="token"):
+        Client(token="", identity=identity)
+
+
 def test_client_rejects_a_non_positive_timeout(identity: Identity) -> None:
     with pytest.raises(ValueError, match="positive"):
         Client(token="tok", identity=identity, timeout=0)
@@ -245,6 +256,14 @@ def test_browse_rejects_a_traversing_path_before_any_request(client: Client) -> 
     route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
     with pytest.raises(ValueError, match="relative_path"):
         client.files.browse("..")
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_browse_validates_options_path_when_positional_is_empty(client: Client) -> None:
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+    with pytest.raises(ValueError, match="relative_path"):
+        client.files.browse(options=BrowseOptions(path=".."))
     assert route.call_count == 0
 
 
