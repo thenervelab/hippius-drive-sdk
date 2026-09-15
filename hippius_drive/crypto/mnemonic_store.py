@@ -60,7 +60,10 @@ def _atomic_write(path: Path, text: str) -> None:
 
     # Create owner-only from the first instant rather than create-then-chmod,
     # so the ciphertext is never briefly readable under a permissive umask.
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(tmp, flags, _FILE_MODE)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
         handle.flush()
@@ -116,6 +119,8 @@ def save_with(path: Path, mnemonic: str, password: str, params: StoreParams) -> 
     Raises:
         MnemonicStoreError: If any of ``params`` is invalid.
     """
+    if not password.strip():
+        raise MnemonicStoreError("password must not be empty")
     if len(params.salt) != SALT_LEN:
         raise MnemonicStoreError(f"salt must be {SALT_LEN} bytes, got {len(params.salt)}")
     if len(params.iv) != IV_LEN:

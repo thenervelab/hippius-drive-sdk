@@ -4,10 +4,12 @@ import respx
 
 from hippius_drive import errors
 from hippius_drive._transport import (
+    MAX_ATTEMPTS,
     REGIONS,
     USER_AGENT,
     AsyncTransport,
     Transport,
+    _attempts_for,
     _http_timeout,
     pick_region,
     pick_region_async,
@@ -22,6 +24,35 @@ def transport() -> tuple[Transport, list[float]]:
     """A transport whose backoff is recorded instead of slept through."""
     slept: list[float] = []
     return Transport(BASE, "tok", sleep=slept.append), slept
+
+
+def test_none_and_non_positive_timeouts_are_rejected() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        Transport(BASE, "tok", timeout=0)
+    with pytest.raises(ValueError, match="positive"):
+        AsyncTransport(BASE, "tok", timeout=-1)
+    with pytest.raises(ValueError, match="positive"):
+        Transport(BASE, "tok", timeout=False)  # bool is not a duration
+
+
+def test_cleartext_server_urls_are_rejected_except_loopback() -> None:
+    with pytest.raises(ValueError, match="https"):
+        Transport("http://eu-central-1-arion.hippius.com", "tok")
+    loopback = Transport("http://127.0.0.1:8080", "tok")
+    loopback.close()
+
+
+def test_an_empty_token_is_rejected() -> None:
+    with pytest.raises(ValueError, match="token"):
+        Transport(BASE, "")
+    with pytest.raises(ValueError, match="token"):
+        AsyncTransport(BASE, "")
+
+
+def test_replayable_override_wins_over_body_shape() -> None:
+    streamed = Request("PUT", "/x", content=iter([b"a"]), replayable=True)
+    assert _attempts_for(streamed) == MAX_ATTEMPTS
+    assert _attempts_for(Request("POST", "/x", content=b"", replayable=False)) == 1
 
 
 def test_prepare_adds_the_bearer_token() -> None:
@@ -217,6 +248,71 @@ def test_stream_yields_the_open_response() -> None:
     with t.stream(build.download("5G", "abc", "ff" * 32)) as response:
         assert response.headers["X-Size-Bytes"] == "4"
         assert b"".join(response.iter_bytes()) == b"blob"
+    t.close()
+
+
+@respx.mock
+def test_stream_retries_a_503_then_yields() -> None:
+    route = respx.get(f"{BASE}/download/5G/abc/{'ff' * 32}")
+    route.side_effect = [
+        httpx.Response(503, json={"Error": {"error": "x", "message": ""}}),
+        httpx.Response(200, content=b"blob"),
+    ]
+    t, slept = transport()
+    with t.stream(build.download("5G", "abc", "ff" * 32)) as response:
+        assert b"".join(response.iter_bytes()) == b"blob"
+    assert route.call_count == 2
+    assert slept
+    t.close()
+
+
+@respx.mock
+def test_stream_does_not_retry_a_write_error() -> None:
+    route = respx.get(f"{BASE}/download/5G/abc/{'ff' * 32}")
+    route.side_effect = httpx.WriteError("reset")
+    t, slept = transport()
+    with (
+        pytest.raises(errors.TransportError, match="WriteError"),
+        t.stream(build.download("5G", "abc", "ff" * 32)),
+    ):
+        pass
+    assert route.call_count == 1
+    assert slept == []
+    t.close()
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_stream_retries_a_503_then_yields() -> None:
+    route = respx.get(f"{BASE}/download/5G/abc/{'ff' * 32}")
+    route.side_effect = [
+        httpx.Response(503, json={"Error": {"error": "x", "message": ""}}),
+        httpx.Response(200, content=b"blob"),
+    ]
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    t = AsyncTransport(BASE, "tok", sleep=sleep)
+    async with t.stream(build.download("5G", "abc", "ff" * 32)) as response:
+        assert b"".join([chunk async for chunk in response.aiter_bytes()]) == b"blob"
+    assert route.call_count == 2
+    assert slept
+    await t.aclose()
+
+
+@respx.mock
+def test_finalize_is_not_retried_on_502() -> None:
+    # hcfs-client does not retry finalize. A 502 after commit must not POST twice.
+    route = respx.post(f"{BASE}/upload/session/s1/finalize").mock(
+        return_value=httpx.Response(502, json={"Error": {"error": "x", "message": ""}})
+    )
+    t, slept = transport()
+    with pytest.raises(errors.ServerError):
+        t.call(build.finalize_session("s1"))
+    assert route.call_count == 1
+    assert slept == []
     t.close()
 
 

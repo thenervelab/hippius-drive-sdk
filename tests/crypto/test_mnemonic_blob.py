@@ -34,6 +34,11 @@ def test_default_kdf_matches_the_rust_defaults() -> None:
     )
 
 
+def test_an_empty_passphrase_is_rejected() -> None:
+    with pytest.raises(mb.MnemonicBlobError, match="empty"):
+        mb.seal(PHRASE, "", SS58, kdf=FAST)
+
+
 def test_wrong_passphrase_raises() -> None:
     blob = mb.seal(PHRASE, "pass", SS58, kdf=FAST)
     with pytest.raises(mb.MnemonicBlobError):

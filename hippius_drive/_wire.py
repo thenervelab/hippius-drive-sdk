@@ -97,6 +97,8 @@ def parse_envelope(status: int, body: Any, *, retry_after: int | None = None) ->
     """
     if isinstance(body, dict):
         if "Success" in body:
+            if status >= BAD_REQUEST:
+                raise errors.InvalidResponse(f"Success envelope with HTTP {status}", status)
             return body["Success"]
         if "Conflict" in body:
             conflict = body["Conflict"]
@@ -131,6 +133,10 @@ class Request:
             ``Content-Length: 0``, which the arion ingress requires on finalize.
         files: Multipart fields, in the order the server must see them.
         headers: Extra headers beyond auth, which the transport adds.
+        replayable: Override the transport retry heuristic. ``False`` for
+            finalize: hcfs-client does not retry it, and a 502 after commit
+            must not POST again. ``None`` uses body shape (JSON/bytes yes,
+            streamed or file-handle bodies no).
     """
 
     method: str
@@ -140,6 +146,7 @@ class Request:
     content: bytes | Iterable[bytes] | None = None
     files: list[MultipartField] | None = None
     headers: dict[str, str] | None = None
+    replayable: bool | None = None
 
 
 def _segment(value: str) -> str:
@@ -569,7 +576,12 @@ class RequestBuilders:
         Returns:
             The request.
         """
-        return Request("POST", f"/upload/session/{_segment(session_id)}/finalize", content=b"")
+        return Request(
+            "POST",
+            f"/upload/session/{_segment(session_id)}/finalize",
+            content=b"",
+            replayable=False,
+        )
 
     @staticmethod
     def delete_session(session_id: str) -> Request:

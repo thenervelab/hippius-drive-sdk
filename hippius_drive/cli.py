@@ -177,6 +177,8 @@ def init(obj: Context, mnemonic: str | None, force: bool) -> None:
     password = obj.config.password
     if password is None:
         password = click.prompt("New password", hide_input=True, confirmation_prompt=True)
+    if not password.strip():
+        raise click.ClickException("password must not be empty")
     mnemonic_store.save(path, phrase, password)
 
     click.echo(f"Wrote {path}")
@@ -188,12 +190,19 @@ def init(obj: Context, mnemonic: str | None, force: bool) -> None:
 @main.command()
 @click.pass_obj
 def whoami(obj: Context) -> None:
-    """Show the account, folder, and public key this configuration resolves to."""
+    """Show the account, folder, and public key, then confirm the token matches.
+
+    The local dump is not enough to diagnose a 403: that is a token/account
+    pairing error, so this also lists folders with the configured token.
+    """
     identity = obj.identity()
     click.echo(f"account      {identity.account_ss58}")
     click.echo(f"label        {identity.label}")
     click.echo(f"folder_hash  {identity.folder_hash}")
     click.echo(f"signing_key  {identity.verifying_key.hex()}")
+    with obj.client() as client:
+        client.folders.list()
+    click.echo("token        accepted for this account")
 
 
 @main.command()
@@ -225,14 +234,20 @@ def register(obj: Context, label: str | None, device_name: str | None) -> None:
 @click.pass_obj
 def ls(obj: Context, path: str, walk: bool, as_json: bool) -> None:
     """List one directory, or every file in the folder with --all."""
+    if walk and path:
+        raise click.ClickException("ls --all lists the whole folder; omit PATH or drop --all")
     with obj.client() as client:
         if walk:
             rows = [f.model_dump(mode="json") for f in client.files.iter_state()]
+            has_more = False
         else:
             result = client.files.browse(path)
             rows = [{"kind": "dir", **f.model_dump(mode="json")} for f in result.folders]
             rows += [{"kind": "file", **f.model_dump(mode="json")} for f in result.files]
+            has_more = result.has_more
     _emit(rows, as_json, _ls_line)
+    if has_more:
+        click.echo("more entries not shown", err=True)
 
 
 def _ls_line(row: dict[str, Any]) -> str:
@@ -282,9 +297,13 @@ def rm(obj: Context, targets: tuple[str, ...]) -> None:
             click.echo(client.files.delete(ids[0]).status)
             return
         result = client.files.delete_many(ids)
-        click.echo(f"deleted {result.files_deleted}")
         for failure in result.errors:
             click.echo(f"failed  {failure.file_id}  {failure.error}", err=True)
+        if result.errors:
+            raise click.ClickException(
+                f"deleted {result.files_deleted}, {len(result.errors)} failed"
+            )
+        click.echo(f"deleted {result.files_deleted}")
 
 
 @main.command()
@@ -298,6 +317,8 @@ def mv(obj: Context, old: str, new: str) -> None:
         result = client.files.rename([RenameSpec(old, new, base)])
         for failure in result.failures:
             raise click.ClickException(f"rename failed: {failure.reason}")
+        if not result.successes:
+            raise click.ClickException("rename returned no successes")
         click.echo(result.successes[0].new_revision_id.hex())
 
 
@@ -326,6 +347,8 @@ def search(
         as_json,
         lambda r: f"{r['size_bytes']:>12}  {r['folder_label'] or '-'}  {r['relative_path'] or '-'}",
     )
+    if result.has_more:
+        click.echo("more hits not shown; pass --limit or page with offset", err=True)
 
 
 @main.command()

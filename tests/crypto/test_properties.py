@@ -95,13 +95,15 @@ def test_normalize_relative_path_is_idempotent(segments: list[str]) -> None:
 
 
 @FAST
-@given(st.lists(_SEGMENT, min_size=1, max_size=4))
-def test_path_hash_ignores_unicode_composition(segments: list[str]) -> None:
-    path = "/".join(segments)
+@given(st.lists(_SEGMENT, min_size=1, max_size=3), st.sampled_from(["café", "Résumé", "naïve"]))
+def test_path_hash_ignores_unicode_composition(segments: list[str], accented: str) -> None:
+    path = "/".join([*segments, accented])
     assume(all(unicodedata.normalize("NFC", s) not in ("", ".", "..") for s in segments))
+    nfd = unicodedata.normalize("NFD", path)
+    assert nfd != path or nfd != unicodedata.normalize("NFC", path)
     # Decomposition never introduces a separator, so the NFD form is still a
     # valid relative path and must land on the same file_id.
-    assert hashes.path_hash(unicodedata.normalize("NFD", path)) == hashes.path_hash(path)
+    assert hashes.path_hash(nfd) == hashes.path_hash(path)
 
 
 _HASH = st.binary(min_size=32, max_size=32)

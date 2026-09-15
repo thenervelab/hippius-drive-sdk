@@ -55,7 +55,8 @@ hippius-drive whoami
 ```
 
 Shows the account, folder label, folder hash and public signing key the current
-configuration resolves to. The first thing to check when a request 403s.
+configuration resolves to, then lists folders with the configured token so a
+token/account mismatch surfaces here as a 403.
 
 ## Folders
 
@@ -66,8 +67,8 @@ hippius-drive register                      # register the configured label
 hippius-drive register --device-name laptop
 ```
 
-`register` treats "already registered" as success — the folder hash is derived
-from the label, so a second device's conflict already means the folder exists.
+`register` is an upsert on the server: a second device registering the same
+label is 200, not a conflict.
 
 ## Files
 
@@ -113,7 +114,8 @@ hit names the folder it came from.
 
 ## Errors
 
-Failures print one line and exit 1 — no traceback. A rejected input (a path
+Failures print one line and exit 1 — no traceback. That includes a batch `rm`
+where some ids failed (HTTP 200 with per-id `errors`). A rejected input (a path
 containing `..`, a batch over the 1000-id cap, a replacement missing its
 `revision_seq`) is reported the same way, because from the command line those
 are user errors rather than defects.

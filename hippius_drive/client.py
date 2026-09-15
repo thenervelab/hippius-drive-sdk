@@ -8,6 +8,7 @@ differ only in whether they await the transport. Namespaces (``folders``,
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
@@ -15,6 +16,7 @@ from types import TracebackType
 from typing import IO, Any, TypeVar
 
 import httpx
+from pydantic import ValidationError
 
 from hippius_drive import _ops, _session, _upload, errors, models
 from hippius_drive._ops import Op
@@ -44,11 +46,22 @@ HTTP_ERROR_FLOOR = 400
 
 def _headers_info(response: httpx.Response) -> models.DownloadInfo:
     """Read the metadata headers that ride along with a successful download."""
-    return models.DownloadInfo(
-        size_bytes=int(response.headers.get("X-Size-Bytes", 0)),
-        revision_id=response.headers.get("X-Revision-Id"),
-        revision_seq=int(response.headers.get("X-Revision-Seq", 0)),
-    )
+    try:
+        return models.DownloadInfo(
+            size_bytes=int(response.headers.get("X-Size-Bytes", 0)),
+            revision_id=response.headers.get("X-Revision-Id"),
+            revision_seq=int(response.headers.get("X-Revision-Seq", 0)),
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise errors.InvalidResponse(
+            f"malformed download headers: {exc}", response.status_code
+        ) from exc
+
+
+def _open_private(path: Path) -> IO[bytes]:
+    """Create ``path`` owner-only, matching the mnemonic store."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    return os.fdopen(fd, "wb")
 
 
 def _raise_download_error(status: int, body: bytes, content_type: str) -> None:
@@ -159,24 +172,19 @@ class FolderOps:
     def register(
         self, label: str | None = None, device_name: str | None = None
     ) -> models.RegisterFolderResult:
-        """Declare a folder, treating "already registered" as success.
+        """Declare a folder.
 
-        ``folder_hash`` is deterministic from the label, so two devices can
-        register the same folder without coordinating; the second one gets a
-        409 that means "it exists", which is what the caller wanted.
+        The server upserts on ``(account, folder_hash)``, so a second device
+        registering the same label is a 200, not a 409.
 
         Args:
             label: The folder to register; the client's own label when omitted.
             device_name: Which device registered it, for display.
 
         Returns:
-            The result, with status ``already_registered`` when a 409 was
-            absorbed.
+            The result. Status is ``registered`` on success.
         """
-        try:
-            return self._client.run(_ops.register_folder(self._client.identity, label, device_name))
-        except errors.Conflict:
-            return models.RegisterFolderResult(status="already_registered")
+        return self._client.run(_ops.register_folder(self._client.identity, label, device_name))
 
     def list(self) -> models.ListFoldersResult:
         """Enumerate every folder the account has registered."""
@@ -293,6 +301,7 @@ class FileOps:
         """
         opts = options if options is not None else BrowseOptions()
         if path:
+            path = hashes.normalize_relative_path(path)
             opts = BrowseOptions(
                 path=path,
                 sort_by=opts.sort_by,
@@ -420,7 +429,7 @@ class FileOps:
         ) as response:
             info = _download_info(response)
             try:
-                with part.open("wb") as out:
+                with _open_private(part) as out:
                     reader = _upload.reader_over(response.iter_bytes())
                     for chunk in file_cipher.decrypt_stream(reader, key):
                         out.write(chunk)
@@ -505,6 +514,8 @@ def _probe_timeout(timeout: float | httpx.Timeout) -> float:
     """Bound the region probe by a float client timeout, never above the default."""
     if isinstance(timeout, httpx.Timeout):
         return PROBE_TIMEOUT
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError("timeout must be a positive number of seconds, or an httpx.Timeout")
     return min(PROBE_TIMEOUT, timeout)
 
 
@@ -628,7 +639,7 @@ class AsyncFolderOps:
     async def register(
         self, label: str | None = None, device_name: str | None = None
     ) -> models.RegisterFolderResult:
-        """Declare a folder, treating "already registered" as success.
+        """Declare a folder. The server upserts; a second device is also 200.
 
         Args:
             label: The folder to register; the client's own label when omitted.
@@ -637,12 +648,9 @@ class AsyncFolderOps:
         Returns:
             The result.
         """
-        try:
-            return await self._client.run(
-                _ops.register_folder(self._client.identity, label, device_name)
-            )
-        except errors.Conflict:
-            return models.RegisterFolderResult(status="already_registered")
+        return await self._client.run(
+            _ops.register_folder(self._client.identity, label, device_name)
+        )
 
     async def list(self) -> models.ListFoldersResult:
         """Enumerate every folder the account has registered."""
@@ -751,6 +759,7 @@ class AsyncFileOps:
         """
         opts = options if options is not None else BrowseOptions()
         if path:
+            path = hashes.normalize_relative_path(path)
             opts = BrowseOptions(
                 path=path,
                 sort_by=opts.sort_by,
@@ -856,7 +865,7 @@ class AsyncFileOps:
             info = await _download_info_async(response)
             spool = await _spool_body(response)
         try:
-            with part.open("wb") as out:
+            with _open_private(part) as out:
                 for chunk in file_cipher.decrypt_stream(spool, key):
                     out.write(chunk)
         except BaseException:
@@ -998,11 +1007,14 @@ class AsyncClient:
     async def can_upload(self, size_bytes: int) -> models.CanUploadResult:
         """Ask whether a write of ``size_bytes`` plaintext would be allowed.
 
+        Advisory only: the write endpoints charge just the growth over the row
+        a manifest replaces, so a refusal here can still succeed on upload.
+
         Args:
             size_bytes: Plaintext bytes the caller intends to write.
 
         Returns:
-            The verdict.
+            The verdict, with a reason when it is negative.
         """
         return await self.run(_ops.can_upload(self.identity, size_bytes))
 

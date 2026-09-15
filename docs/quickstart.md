@@ -58,7 +58,7 @@ from pathlib import Path
 from hippius_drive import Client
 
 with Client(token=token, identity=identity) as client:
-    client.folders.register()  # a 409 is treated as success
+    client.folders.register()  # upsert; a second device is also 200
 
     result = client.files.put(Path("report.pdf"), "work/report.pdf")
     print(result.revision_id.hex())
@@ -71,7 +71,7 @@ with Client(token=token, identity=identity) as client:
 `put` routes by size on its own: a blob that fits one 8 MiB transport chunk goes
 as a single request, anything larger through a resumable chunked session.
 
-`file_id` is `hex(BLAKE3(path))` and needs no round trip. One caveat: the
+`file_id` is `hex(BLAKE3(NFC path))` and needs no round trip. One caveat: the
 desktop client hashes raw OS bytes, so a macOS-created file with an accented
 name can carry a decomposed (NFD) id this will not reproduce. Find those through
 `files.state()` instead.

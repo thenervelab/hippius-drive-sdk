@@ -92,6 +92,11 @@ class Config:
         return self.account_ss58
 
 
+def _kept(value: Any) -> bool:
+    """Drop blank strings so they cannot shadow a lower layer."""
+    return not (isinstance(value, str) and not value.strip())
+
+
 def _from_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -139,9 +144,15 @@ def load(
     env = environ if environ is not None else dict(os.environ)
     path = config_path if config_path is not None else CONFIG_PATH
 
-    merged: dict[str, Any] = _from_file(path)
-    merged.update(_from_env(env))
-    merged.update({k: v for k, v in (overrides or {}).items() if v is not None and k in _FIELDS})
+    merged: dict[str, Any] = {key: value for key, value in _from_file(path).items() if _kept(value)}
+    merged.update({key: value for key, value in _from_env(env).items() if _kept(value)})
+    merged.update(
+        {
+            key: value
+            for key, value in (overrides or {}).items()
+            if value is not None and key in _FIELDS and _kept(value)
+        }
+    )
 
     if "mnemonic_file" in merged:
         merged["mnemonic_file"] = Path(merged["mnemonic_file"]).expanduser()

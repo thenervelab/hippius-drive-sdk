@@ -1,3 +1,4 @@
+import ast
 import json
 from pathlib import Path
 
@@ -6,7 +7,7 @@ import pytest
 import respx
 from click.testing import CliRunner, Result
 
-from hippius_drive import cli
+from hippius_drive import __version__, cli
 from hippius_drive.cli import main
 from hippius_drive.crypto import file_cipher, hashes, kdf, mnemonic_store
 from hippius_drive.identity import Identity
@@ -58,7 +59,7 @@ def key() -> bytes:
 
 
 def test_version_is_reported() -> None:
-    assert "0.1.0" in run(["--version"]).output
+    assert __version__ in run(["--version"]).output
 
 
 def test_init_generates_a_phrase_and_writes_the_store(tmp_path: Path) -> None:
@@ -94,11 +95,28 @@ def test_init_rejects_an_invalid_phrase(tmp_path: Path) -> None:
     assert "invalid recovery phrase" in result.output
 
 
+@respx.mock
 def test_whoami_reports_the_derived_identity(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/list_folders/{SS58}").mock(
+        return_value=httpx.Response(200, json={"Success": {"folders": []}})
+    )
     output = run(["whoami"], env).output
     assert SS58 in output
     assert FOLDER in output
     assert kdf.folder_hash("default") in output
+    assert "accepted for this account" in output
+
+
+@respx.mock
+def test_whoami_surfaces_a_403(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/list_folders/{SS58}").mock(
+        return_value=httpx.Response(
+            403, json={"Error": {"error": "forbidden", "message": "wrong account"}}
+        )
+    )
+    result = run(["whoami"], env)
+    assert result.exit_code == 1
+    assert "forbidden" in result.output
 
 
 def test_whoami_without_an_account_explains_where_it_comes_from(
@@ -196,6 +214,25 @@ def test_ls_all_walks_get_state(env: dict[str, str]) -> None:
     )
     assert "a.bin" in run(["ls", "--all"], env).output
     assert route.call_count == 1
+
+
+def test_ls_all_rejects_a_path(env: dict[str, str]) -> None:
+    result = run(["ls", "work", "--all"], env)
+    assert result.exit_code != 0
+    assert "--all" in result.output
+
+
+@respx.mock
+def test_ls_notes_when_a_page_is_truncated(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
+        return_value=httpx.Response(
+            200,
+            json={"Success": {"folders": [], "files": [FILE_JSON], "has_more": True}},
+        )
+    )
+    result = run(["ls"], env)
+    assert result.exit_code == 0
+    assert "more entries not shown" in result.output
 
 
 @respx.mock
@@ -320,6 +357,23 @@ def test_mv_reports_a_per_entry_failure(env: dict[str, str]) -> None:
 
 
 @respx.mock
+def test_mv_empty_successes_is_a_failure(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/get_state/{SS58}/{FOLDER}").mock(
+        return_value=httpx.Response(
+            200, json={"Success": {"files": [FILE_JSON], "has_more": False}}
+        )
+    )
+    respx.post(f"{BASE}/rename_files").mock(
+        return_value=httpx.Response(
+            200, json={"Success": {"renamed_count": 0, "successes": [], "failures": []}}
+        )
+    )
+    result = run(["mv", "a.bin", "b.bin"], env)
+    assert result.exit_code != 0
+    assert "no successes" in result.output
+
+
+@respx.mock
 def test_mv_on_an_unknown_path_says_so(env: dict[str, str]) -> None:
     respx.get(f"{BASE}/get_state/{SS58}/{FOLDER}").mock(
         return_value=httpx.Response(200, json={"Success": {"files": [], "has_more": False}})
@@ -343,6 +397,19 @@ def test_search_passes_the_filters(env: dict[str, str]) -> None:
     assert params["file_type"] == "image,.pdf"
     assert params["limit"] == "5"
     assert "Docs" in output
+
+
+@respx.mock
+def test_search_notes_when_results_are_truncated(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/search_files/{SS58}").mock(
+        return_value=httpx.Response(
+            200,
+            json={"Success": {"files": [{**FILE_JSON, "folder_label": "Docs"}], "has_more": True}},
+        )
+    )
+    result = run(["search", "report"], env)
+    assert result.exit_code == 0
+    assert "more hits not shown" in result.output
 
 
 @respx.mock
@@ -384,14 +451,30 @@ def test_a_401_exits_one_with_no_traceback(env: dict[str, str]) -> None:
 
 def test_the_cli_only_imports_the_public_surface() -> None:
     # The CLI is the reference example: if it needs a private module, the
-    # public API is missing something.
-    source = Path("hippius_drive/cli.py").read_text(encoding="utf-8")
-    private = {
-        line
-        for line in source.splitlines()
-        if line.startswith("from hippius_drive") and "import _" in line
-    }
-    assert private <= {"from hippius_drive import __version__, _config, errors"}
+    # public API is missing something. Parse the AST so `from hippius_drive._ops
+    # import X` cannot sneak past a line-oriented grep.
+    tree = ast.parse(Path("hippius_drive/cli.py").read_text(encoding="utf-8"))
+    allowed_private_modules = {"hippius_drive._config"}
+    allowed_private_names = {"_config", "__version__"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.startswith("hippius_drive._"):
+                assert node.module in allowed_private_modules, node.module
+            if node.module == "hippius_drive":
+                leaked = {
+                    alias.name
+                    for alias in node.names
+                    if alias.name.startswith("_") and alias.name not in allowed_private_names
+                }
+                assert not leaked
+        if isinstance(node, ast.Import):
+            leaked_mods = [
+                alias.name
+                for alias in node.names
+                if alias.name.startswith("hippius_drive._")
+                and alias.name not in allowed_private_modules
+            ]
+            assert not leaked_mods
 
 
 def test_init_prompts_for_a_password_when_the_env_does_not_supply_one(tmp_path: Path) -> None:
@@ -408,7 +491,21 @@ def test_init_prompts_for_a_password_when_the_env_does_not_supply_one(tmp_path: 
     assert mnemonic_store.load(path, "hunter22") == phrase
 
 
-def test_a_mismatched_password_confirmation_is_rejected(tmp_path: Path) -> None:
+def test_init_rejects_an_empty_password(tmp_path: Path) -> None:
+    path = tmp_path / "enc.json"
+    result = CliRunner().invoke(
+        main,
+        ["init"],
+        env={"HIPPIUS_MNEMONIC_FILE": str(path)},
+        input=" \n \n",
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "empty" in result.output.lower()
+    assert not path.exists()
+
+
+def test_init_reprompts_when_confirmation_does_not_match(tmp_path: Path) -> None:
     path = tmp_path / "enc.json"
     result = CliRunner().invoke(
         main,
@@ -461,8 +558,10 @@ def test_rm_reports_per_id_failures_on_stderr(env: dict[str, str]) -> None:
         )
     )
     result = run(["rm", "a.bin", "b.bin"], env)
+    assert result.exit_code == 1
     assert "deleted 1" in result.output
     assert "database_error" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_run_is_the_console_script_entry_point() -> None:

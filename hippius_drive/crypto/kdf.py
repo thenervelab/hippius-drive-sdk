@@ -7,7 +7,7 @@ under the old derivation, because the server namespace is derived from it.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mnemonic import Mnemonic
 
@@ -30,8 +30,8 @@ class FolderKeys:
         encryption_key: XChaCha20-Poly1305 key, equal to ``signing_seed``.
     """
 
-    signing_seed: bytes
-    encryption_key: bytes
+    signing_seed: bytes = field(repr=False)
+    encryption_key: bytes = field(repr=False)
 
 
 def _seed(phrase: str) -> bytes:

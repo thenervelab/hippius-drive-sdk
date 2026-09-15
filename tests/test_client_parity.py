@@ -20,12 +20,14 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from nacl.signing import VerifyKey
 
 from hippius_drive import errors
 from hippius_drive._transport import AsyncTransport, Transport
 from hippius_drive._upload import TRANSPORT_CHUNK
 from hippius_drive.client import AsyncClient, Client
-from hippius_drive.identity import Identity
+from hippius_drive.crypto import file_cipher
+from hippius_drive.identity import Identity, tos_text
 from hippius_drive.models import BrowseOptions, RenameSpec, SearchFilters
 from tests.helpers import manifest_from
 
@@ -187,6 +189,10 @@ async def test_upload_manifests_agree_except_for_the_random_nonce(identity: Iden
         "source",
     )
     assert {k: async_manifest[k] for k in stable} == {k: sync_manifest[k] for k in stable}
+    for manifest in (sync_manifest, async_manifest):
+        VerifyKey(bytes(manifest["signing_key"])).verify(
+            tos_text(manifest["ciphertext_hash"]).encode(), bytes(manifest["signature"])
+        )
 
 
 @respx.mock
@@ -283,6 +289,14 @@ async def test_both_clients_route_a_large_file_through_a_session(identity: Ident
     assert single.call_count == 0, "neither client may use the single-shot path here"
     assert chunks.call_count - sync_chunks == sync_chunks == 3
     assert result.revision_id == bytes([4] * 32)
+
+    def assembled(offset: int) -> bytes:
+        calls = chunks.calls[offset : offset + sync_chunks]
+        by_index = sorted(calls, key=lambda c: int(c.request.url.path.rsplit("/", 1)[1]))
+        return b"".join(call.request.content for call in by_index)
+
+    assert file_cipher.decrypt_bytes(assembled(0), identity.encryption_key) == payload
+    assert file_cipher.decrypt_bytes(assembled(sync_chunks), identity.encryption_key) == payload
 
 
 @respx.mock

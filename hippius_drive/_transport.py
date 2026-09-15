@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -48,6 +49,20 @@ def _jittered(delay: float) -> float:
     return delay * (0.5 + random.random())  # noqa: S311 - backoff jitter, not crypto
 
 
+_LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _require_https_server(base_url: str) -> None:
+    """Reject cleartext URLs except loopback, used for local hcfs."""
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "https" and host:
+        return
+    if parsed.scheme == "http" and host in _LOOPBACK:
+        return
+    raise ValueError(f"server_url must be https:// (or http:// on localhost), got {base_url!r}")
+
+
 def _http_timeout(timeout: float | httpx.Timeout, *, cap_write: bool) -> httpx.Timeout:
     """Spread a float over the phases httpx times separately.
 
@@ -56,9 +71,15 @@ def _http_timeout(timeout: float | httpx.Timeout, *, cap_write: bool) -> httpx.T
     The anyio backend holds one deadline over the whole body, which would kill
     an 8 MiB session chunk at 60s on a link under ~140 KB/s, so the async
     transport leaves writes uncapped.
+
+    ``None`` and non-positive floats are rejected: ``httpx.Timeout(None)``
+    means "wait forever", which is not a useful default for a missing value.
+    Pass an explicit ``httpx.Timeout`` to control phases individually.
     """
     if isinstance(timeout, httpx.Timeout):
         return timeout
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError("timeout must be a positive number of seconds, or an httpx.Timeout")
     return httpx.Timeout(timeout) if cap_write else httpx.Timeout(timeout, write=None)
 
 
@@ -123,8 +144,12 @@ def _attempts_for(request: Request) -> int:
 
     A file handle or generator body is consumed by the first attempt, so
     replaying it would put a truncated body on the wire. Only bytes and JSON
-    bodies get the full ladder.
+    bodies get the full ladder, unless ``request.replayable`` overrides.
     """
+    if request.replayable is False:
+        return 1
+    if request.replayable is True:
+        return MAX_ATTEMPTS
     if request.files is not None:
         replayable = all(isinstance(content, bytes) for _, (_, content, _) in request.files)
     else:
@@ -162,6 +187,9 @@ class Transport:
             timeout: Per-phase budget in seconds, or a full ``httpx.Timeout``.
             sleep: Injected so tests do not actually wait out the backoff.
         """
+        if not token:
+            raise ValueError("token is required")
+        _require_https_server(base_url)
         self.base_url = base_url.rstrip("/")
         self._token = token
         self._sleep = sleep
@@ -220,6 +248,9 @@ class Transport:
     def stream(self, request: Request) -> Iterator[httpx.Response]:
         """Open ``request`` as a streaming response, for downloads.
 
+        Retries the same connect/timeout/502-504 set as :meth:`send` until
+        the body is yielded. After the first byte, the stream is not replayed.
+
         Args:
             request: The sans-I/O request.
 
@@ -230,11 +261,22 @@ class Transport:
             TransportError: If the connection failed.
         """
         kwargs = prepare(request, self._token)
-        try:
-            with self._client.stream(**kwargs) as response:
-                yield response
-        except httpx.HTTPError as exc:
-            raise _transport_error(exc) from exc
+        attempts = _attempts_for(request)
+        last: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                with self._client.stream(**kwargs) as response:
+                    if attempt == attempts or response.status_code not in _RETRYABLE_STATUSES:
+                        yield response
+                        return
+            except _RETRYABLE_EXCEPTIONS as exc:
+                last = exc
+            except httpx.HTTPError as exc:
+                raise _transport_error(exc) from exc
+            if attempt < attempts:
+                self._sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
+        assert last is not None  # noqa: S101 - the loop yields on any response
+        raise _transport_error(last)
 
     def close(self) -> None:
         """Close the underlying connection pool."""
@@ -266,6 +308,9 @@ class AsyncTransport:
                 because anyio applies it to the whole request body.
             sleep: Injected so tests do not actually wait out the backoff.
         """
+        if not token:
+            raise ValueError("token is required")
+        _require_https_server(base_url)
         self.base_url = base_url.rstrip("/")
         self._token = token
         self._sleep = sleep
@@ -322,6 +367,9 @@ class AsyncTransport:
     async def stream(self, request: Request) -> AsyncIterator[httpx.Response]:
         """Open ``request`` as a streaming response, for downloads.
 
+        Same retry policy as :meth:`Transport.stream`: connect/timeout/502-504
+        before the body is yielded, never after.
+
         Args:
             request: The sans-I/O request.
 
@@ -332,11 +380,22 @@ class AsyncTransport:
             TransportError: If the connection failed.
         """
         kwargs = prepare(request, self._token)
-        try:
-            async with self._client.stream(**kwargs) as response:
-                yield response
-        except httpx.HTTPError as exc:
-            raise _transport_error(exc) from exc
+        attempts = _attempts_for(request)
+        last: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                async with self._client.stream(**kwargs) as response:
+                    if attempt == attempts or response.status_code not in _RETRYABLE_STATUSES:
+                        yield response
+                        return
+            except _RETRYABLE_EXCEPTIONS as exc:
+                last = exc
+            except httpx.HTTPError as exc:
+                raise _transport_error(exc) from exc
+            if attempt < attempts:
+                await self._sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
+        assert last is not None  # noqa: S101 - the loop yields on any response
+        raise _transport_error(last)
 
     async def aclose(self) -> None:
         """Close the underlying connection pool."""

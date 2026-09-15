@@ -46,6 +46,16 @@ def test_a_source_that_shrinks_mid_read_fails_and_releases_the_spool(
         _upload.prepare(identity, source, UploadSpec("a.bin"))
 
 
+def test_a_source_that_grows_past_a_full_frame_is_rejected(identity: Identity) -> None:
+    # encrypt_stream reads CHUNK_SIZE per full frame. If the file grew and the
+    # declared size is a multiple of that, a to-EOF hash would cover extra
+    # bytes the ciphertext does not. Both passes must see the same prefix.
+    grown = b"x" * (file_cipher.CHUNK_SIZE + 50)
+    source = PlaintextSource(open=lambda: io.BytesIO(grown), size=file_cipher.CHUNK_SIZE)
+    with pytest.raises(ValueError, match="declared plaintext_size"):
+        _upload.prepare(identity, source, UploadSpec("a.bin"))
+
+
 def test_prepare_closes_the_spool_when_encryption_fails(
     identity: Identity, monkeypatch: pytest.MonkeyPatch
 ) -> None:

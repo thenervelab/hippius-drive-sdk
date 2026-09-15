@@ -42,6 +42,11 @@ def client(identity: Identity) -> Client:
     return Client(token="tok", identity=identity, transport=Transport(BASE, "tok"))
 
 
+def test_client_rejects_a_non_positive_timeout(identity: Identity) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        Client(token="tok", identity=identity, timeout=0)
+
+
 def test_client_never_probes_a_region_when_given_a_server(identity: Identity) -> None:
     # A constructor that reached the network would make offline use impossible.
     with Client(token="tok", identity=identity, server_url=BASE) as c:
@@ -85,15 +90,16 @@ def test_register_folder_sends_the_label_hash(client: Client) -> None:
 
 
 @respx.mock
-def test_register_folder_absorbs_a_409(client: Client) -> None:
-    # Deterministic folder_hash means a second device's 409 says "it exists",
-    # which is exactly the state the caller asked for.
+def test_register_folder_does_not_absorb_a_409(client: Client) -> None:
+    # hcfs-server upserts register_folder and returns 200. hcfs-client treats
+    # a 409 as an unexpected conflict, not "already registered".
     respx.post(f"{BASE}/register_folder").mock(
         return_value=httpx.Response(
             409, json={"Error": {"error": "conflict", "message": "already"}}
         )
     )
-    assert client.folders.register().status == "already_registered"
+    with pytest.raises(errors.Conflict):
+        client.folders.register()
 
 
 @respx.mock
@@ -235,6 +241,22 @@ def test_browse_path_argument_wins_over_the_options_object(client: Client) -> No
 
 
 @respx.mock
+def test_browse_rejects_a_traversing_path_before_any_request(client: Client) -> None:
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+    with pytest.raises(ValueError, match="relative_path"):
+        client.files.browse("..")
+    assert route.call_count == 0
+
+
+def test_client_does_not_read_hippius_token_from_the_environment(
+    identity: Identity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HIPPIUS_TOKEN", "from-env")
+    with Client(token="tok", identity=identity, server_url=BASE) as client:
+        assert client.transport._token == "tok"
+
+
+@respx.mock
 def test_search_sends_every_filter(client: Client) -> None:
     route = respx.get(f"{BASE}/search_files/{SS58}").mock(
         return_value=httpx.Response(
@@ -314,8 +336,8 @@ def test_can_upload_refusal_is_a_200_not_an_exception(client: Client) -> None:
 
 
 @respx.mock
-def test_a_402_on_a_real_write_raises_quota_exceeded(client: Client) -> None:
-    respx.get(f"{BASE}/get_state/{SS58}/{FOLDER}").mock(
+def test_a_402_on_upload_raises_quota_exceeded(client: Client) -> None:
+    respx.post(f"{BASE}/upload").mock(
         return_value=httpx.Response(
             402,
             json={
@@ -327,7 +349,7 @@ def test_a_402_on_a_real_write_raises_quota_exceeded(client: Client) -> None:
         )
     )
     with pytest.raises(errors.QuotaExceeded) as exc:
-        client.files.state()
+        client.files.put_bytes(b"x", "a.bin")
     assert exc.value.required_cents == 5
 
 
@@ -373,14 +395,15 @@ async def test_async_client_mirrors_the_sync_surface(identity: Identity) -> None
 
 @respx.mock
 @pytest.mark.anyio
-async def test_async_register_absorbs_a_409(identity: Identity) -> None:
+async def test_async_register_does_not_absorb_a_409(identity: Identity) -> None:
     respx.post(f"{BASE}/register_folder").mock(
         return_value=httpx.Response(409, json={"Error": {"error": "conflict", "message": ""}})
     )
     async with AsyncClient(
         token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
     ) as client:
-        assert (await client.folders.register()).status == "already_registered"
+        with pytest.raises(errors.Conflict):
+            await client.folders.register()
 
 
 @respx.mock
