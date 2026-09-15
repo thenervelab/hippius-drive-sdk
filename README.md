@@ -38,6 +38,9 @@ concurrency decision.
 See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough, and
 [docs/cli.md](docs/cli.md) for the `hippius-drive` command line.
 
+**Agents:** read [AGENTS.md](AGENTS.md). It is the instruction set for using
+this SDK and for changing this repository. Point an agent at that file.
+
 ## Where the account address comes from
 
 `account_ss58` is the Hippius account your **token** belongs to. It is *not*

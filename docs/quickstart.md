@@ -163,10 +163,11 @@ async with AsyncClient(
         print(entry.relative_path)
 ```
 
-One difference: `Client` probes for the fastest healthy region in its
-constructor, which `AsyncClient` cannot do without a running event loop. Pass
-`server_url`, or `await pick_region_async()` from `hippius_drive._transport` and
-build the transport yourself.
+One difference: `Client` probes `/health` on each region in `REGIONS` order
+(EU, then US) and uses the first that answers, which `AsyncClient` cannot do
+without a running event loop. Pass `server_url`, or
+`server_url=await pick_region_async()` from `hippius_drive._transport` (it
+returns a URL, not a transport).
 
 ## Errors
 

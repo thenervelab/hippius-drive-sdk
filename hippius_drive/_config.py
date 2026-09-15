@@ -43,7 +43,7 @@ class Config:
     Attributes:
         token: The bearer token the auth service issued.
         account_ss58: The account the token resolves to; the server namespace.
-        server_url: A specific server, or None to probe for the fastest region.
+        server_url: A specific server, or None to probe for the first healthy region.
         mnemonic_file: Where the encrypted master mnemonic lives.
         label: Which folder to act on.
         password: The mnemonic-file password, if it came from the environment.

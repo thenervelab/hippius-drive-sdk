@@ -61,7 +61,15 @@ path = "hippius_drive/_version.py"
 packages = ["hippius_drive"]
 
 [tool.hatch.build.targets.sdist]
-include = ["hippius_drive", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = [
+  "hippius_drive",
+  "tests",
+  "docs",
+  "README.md",
+  "LICENSE",
+  "pyproject.toml",
+  "AGENTS.md",
+]
 
 [tool.pytest.ini_options]
 # Coverage is measured on every run so a gap shows up in review, not in a

@@ -19,7 +19,7 @@ Resolved in this order, first match winning:
 |---|---|---|---|
 | `--token` | `HIPPIUS_TOKEN` | `token` | API token from the console |
 | `--account` | `HIPPIUS_ACCOUNT_SS58` | `account_ss58` | The account that token belongs to |
-| `--server` | `HIPPIUS_SERVER_URL` | `server_url` | A specific server; otherwise the fastest healthy region |
+| `--server` | `HIPPIUS_SERVER_URL` | `server_url` | A specific server; otherwise the first healthy region in REGIONS order (EU, then US) |
 | `--mnemonic-file` | `HIPPIUS_MNEMONIC_FILE` | `mnemonic_file` | Encrypted phrase; defaults to `~/.config/hippius-drive/enc_mnemonic.json` |
 | `--label` | `HIPPIUS_FOLDER_LABEL` | `label` | Folder to act on; defaults to `default` |
 | — | `HIPPIUS_PASSWORD` | `password` | Unlock password; prompted when unset and on a terminal |
