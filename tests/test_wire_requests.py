@@ -162,6 +162,7 @@ def test_finalize_sends_an_explicit_empty_body() -> None:
     assert r.method == "POST"
     assert r.path == "/upload/session/s1/finalize"
     assert r.content == b""
+    assert r.replayable is False
 
 
 def test_path_segments_are_percent_encoded() -> None:

@@ -94,3 +94,10 @@ def test_empty_env_values_are_treated_as_unset(tmp_path: Path) -> None:
 def test_password_comes_from_the_environment(tmp_path: Path) -> None:
     cfg = _config.load({}, environ={"HIPPIUS_PASSWORD": "pw"}, config_path=tmp_path / "x.toml")
     assert cfg.password == "pw"
+
+
+def test_empty_strings_in_the_file_and_flags_are_treated_as_unset(tmp_path: Path) -> None:
+    path = write_config(tmp_path, 'token = "from-file"\npassword = ""\n')
+    cfg = _config.load({"token": "  "}, environ={}, config_path=path)
+    assert cfg.token == "from-file"
+    assert cfg.password is None

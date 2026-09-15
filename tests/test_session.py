@@ -356,7 +356,7 @@ def test_sync_failure_stops_the_window_and_still_deletes_the_session(
 
     chunks.side_effect = reject_first
     deleted = respx.delete(f"{BASE}/upload/session/s1").mock(
-        return_value=httpx.Response(200, json={"Success": None})
+        return_value=httpx.Response(200, json={"Success": {"deleted": True}})
     )
     with prepared(identity, SMALL_CHUNK * 8) as up:
         plan = _session.SessionPlan(up, chunk_size=SMALL_CHUNK, parallel=2)

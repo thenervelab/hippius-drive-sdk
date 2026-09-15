@@ -11,9 +11,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from hippius_drive import models
+from hippius_drive import errors, models
 from hippius_drive._upload import TRANSPORT_CHUNK, PreparedUpload
 from hippius_drive._wire import Request, build
 from hippius_drive.crypto import kdf
@@ -46,7 +46,10 @@ def _parser(model: type[M]) -> Callable[[Any], M]:
     """Bind a model class into a payload parser, so ops read as one expression."""
 
     def parse(payload: Any) -> M:
-        return model.model_validate(payload)
+        try:
+            return model.model_validate(payload)
+        except ValidationError as exc:
+            raise errors.InvalidResponse(f"could not parse {model.__name__}: {exc}") from exc
 
     return parse
 

@@ -25,6 +25,12 @@ def test_round_trip_and_file_mode(tmp_path: Path) -> None:
     assert len(base64.b64decode(body["iv"])) == 12
 
 
+def test_an_empty_password_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ms.MnemonicStoreError, match="empty"):
+        ms.save(tmp_path / "e.json", PHRASE, "")
+    assert not (tmp_path / "e.json").exists()
+
+
 def test_wrong_password_raises(tmp_path: Path) -> None:
     path = tmp_path / "e.json"
     ms.save(path, PHRASE, "right")

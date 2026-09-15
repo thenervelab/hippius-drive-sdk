@@ -45,7 +45,7 @@ mnemonic_store.save(Path("enc_mnemonic.json"), phrase, password)
 identity = Identity.from_master(phrase, "default", account_ss58=account)
 
 with Client(token=token, identity=identity) as client:
-    client.folders.register()  # 409 "already registered" is success
+    client.folders.register()  # upsert; a second device is also 200
     result = client.files.put(Path("report.pdf"), "work/report.pdf")
     file_id = client.files.file_id("work/report.pdf")
     client.files.get(file_id, Path("out.pdf"))
@@ -61,7 +61,7 @@ not in `__all__` — the CLI and the quickstart both import it.
 
 | Want | Call |
 |---|---|
-| Register this folder | `client.folders.register()` |
+| Register this folder | `client.folders.register()` — server upserts; 200 even on a second device |
 | List registered folders | `client.folders.list()` |
 | Delete a folder and every file in it | `client.folders.unregister()` — irreversible |
 | Upload a new file | `client.files.put(path, "dir/name.ext")` |

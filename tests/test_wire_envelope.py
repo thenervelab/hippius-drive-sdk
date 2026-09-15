@@ -12,6 +12,11 @@ def test_success_wins_even_on_an_odd_status() -> None:
     assert parse_envelope(201, {"Success": {"a": 1}}) == {"a": 1}
 
 
+def test_success_envelope_on_an_error_status_is_invalid() -> None:
+    with pytest.raises(errors.InvalidResponse, match="HTTP 409"):
+        parse_envelope(409, {"Success": {"a": 1}})
+
+
 def test_unenveloped_success_passes_through() -> None:
     # /list_folder_entries and /can_upload return the payload directly.
     assert parse_envelope(200, {"relative_paths": []}) == {"relative_paths": []}

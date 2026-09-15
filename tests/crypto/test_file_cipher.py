@@ -55,6 +55,12 @@ def test_ciphertext_size_matches_the_rust_estimate() -> None:
     assert fc.ciphertext_size(3 * fc.CHUNK_SIZE) == 28 + 3 * 20 + 3 * fc.CHUNK_SIZE
 
 
+def test_wrong_key_is_detected() -> None:
+    blob = fc.encrypt_bytes(b"secret data", KEY)
+    with pytest.raises(DecryptError):
+        fc.decrypt_bytes(blob, bytes([1] * 32))
+
+
 def test_tamper_is_detected() -> None:
     blob = bytearray(fc.encrypt_bytes(b"hello", KEY))
     blob[-1] ^= 0xFF

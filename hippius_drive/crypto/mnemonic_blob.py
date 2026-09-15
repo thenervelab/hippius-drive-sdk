@@ -150,6 +150,8 @@ def seal_with(mnemonic: str, passphrase: str, ss58: str, inputs: SealInputs) -> 
         MnemonicBlobError: If the salt or nonce has the wrong length, or the
             KDF rejects the parameters.
     """
+    if not passphrase.strip():
+        raise MnemonicBlobError("passphrase must not be empty")
     if len(inputs.salt) != SALT_LEN:
         raise MnemonicBlobError(f"salt must be {SALT_LEN} bytes, got {len(inputs.salt)}")
     if len(inputs.nonce) != NONCE_LEN:

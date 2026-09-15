@@ -68,6 +68,7 @@ def test_encryption_key_is_the_signing_seed() -> None:
 def test_repr_does_not_leak_key_material() -> None:
     ident = Identity.from_master(MASTER, "default", account_ss58=SS58)
     assert ident.keys.signing_seed.hex() not in repr(ident)
+    assert ident.keys.signing_seed.hex() not in repr(ident.keys)
 
 
 def test_empty_account_ss58_is_rejected() -> None:

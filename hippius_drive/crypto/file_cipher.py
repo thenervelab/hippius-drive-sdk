@@ -19,7 +19,7 @@ from __future__ import annotations
 import io
 import os
 from collections.abc import Iterator
-from typing import IO
+from typing import IO, Protocol
 
 from nacl import bindings
 from nacl.exceptions import CryptoError
@@ -34,6 +34,14 @@ NONCE_LEN = 24
 HEADER_LEN = NONCE_LEN + 4
 FRAME_HEADER_LEN = 4
 MAX_FRAME_LEN = CHUNK_SIZE + TAG_LEN
+
+
+class ByteReader(Protocol):
+    """Anything ``encrypt_stream`` can pull plaintext from."""
+
+    def read(self, size: int = -1, /) -> bytes:
+        """Read up to ``size`` bytes."""
+        ...
 
 
 def chunk_nonce(base_nonce: bytes, index: int) -> bytes:
@@ -79,7 +87,7 @@ def ciphertext_size(plaintext_size: int) -> int:
     return HEADER_LEN + frames * (FRAME_HEADER_LEN + TAG_LEN) + plaintext_size
 
 
-def _read_upto(reader: IO[bytes], size: int) -> bytes:
+def _read_upto(reader: ByteReader, size: int) -> bytes:
     """Read up to ``size`` bytes, looping over short reads until EOF."""
     parts: list[bytes] = []
     remaining = size
@@ -93,7 +101,7 @@ def _read_upto(reader: IO[bytes], size: int) -> bytes:
 
 
 def encrypt_stream(
-    reader: IO[bytes],
+    reader: ByteReader,
     key: bytes,
     plaintext_size: int,
     base_nonce: bytes | None = None,

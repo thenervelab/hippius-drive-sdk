@@ -335,8 +335,8 @@ class RegisterFolderResult(_Wire):
     """What ``/register_folder`` returns.
 
     Attributes:
-        status: ``registered``, or ``already_registered`` when the SDK
-            absorbed the 409 that a second device gets.
+        status: ``registered``. The server upserts, so a second device
+            registering the same label is also this status.
     """
 
     status: str

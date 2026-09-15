@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 from pathlib import Path
 
 import httpx
@@ -154,6 +156,14 @@ def test_put_surfaces_a_stale_revision_as_conflict(client: Client) -> None:
     with pytest.raises(errors.Conflict) as exc:
         client.files.put_bytes(b"x", "a.bin", base_revision_id=bytes(32), revision_seq=2)
     assert exc.value.current_revision_seq == 9
+    assert exc.value.current_revision_id == bytes([3] * 32)
+
+
+@respx.mock
+def test_a_success_body_missing_required_fields_is_invalid_response(client: Client) -> None:
+    respx.post(f"{BASE}/upload").mock(return_value=httpx.Response(200, json={"Success": {}}))
+    with pytest.raises(errors.InvalidResponse, match="UploadResult"):
+        client.files.put_bytes(b"x", "a.bin")
 
 
 @respx.mock
@@ -162,6 +172,20 @@ def test_put_rejects_a_traversing_path_before_any_request(client: Client) -> Non
     with pytest.raises(ValueError, match="relative_path"):
         client.files.put_bytes(b"x", "../escape.bin")
     assert route.call_count == 0
+
+
+@respx.mock
+def test_get_rejects_malformed_size_headers(
+    client: Client, identity: Identity, tmp_path: Path
+) -> None:
+    blob = file_cipher.encrypt_bytes(b"y", identity.encryption_key)
+    file_id = client.files.file_id("a.bin")
+    respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
+        return_value=httpx.Response(200, content=blob, headers={"X-Size-Bytes": "not-a-number"})
+    )
+    with pytest.raises(errors.InvalidResponse, match="download headers"):
+        client.files.get(file_id, tmp_path / "a.bin")
+    assert not (tmp_path / "a.bin").exists()
 
 
 def test_file_id_is_the_hex_path_hash(client: Client) -> None:
@@ -195,6 +219,8 @@ def test_get_writes_the_plaintext_and_reports_the_headers(
     assert info.revision_id == bytes.fromhex("ab" * 32)
     assert info.revision_seq == 3
     assert not (tmp_path / "out" / "a.bin.part").exists()
+    if os.name == "posix":
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 
 
 @respx.mock

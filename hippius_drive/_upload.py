@@ -1,10 +1,9 @@
 """Turning a local file into a signed manifest plus an encrypted blob.
 
-The plaintext is read twice, deliberately. ``salted_hash`` is over the
-plaintext, and the manifest must be complete before the multipart body starts
-going out, so the hash cannot be computed from the same pass that encrypts.
-The second pass streams into a spooled temp file, which keeps small uploads
-entirely in memory and spills large ones to disk instead of growing unbounded.
+Plaintext is read once: ``salted_hash`` is taken from the same bytes that
+are encrypted, then the ciphertext is spooled so the signed manifest can
+go out ahead of the body. Small blobs stay in memory; larger ones spill
+to a temp file instead of growing unbounded.
 """
 
 from __future__ import annotations
@@ -35,8 +34,6 @@ SPOOL_MAX = TRANSPORT_CHUNK
 
 DEFAULT_SOURCE = "python-sdk"
 """Client family reported for analytics. Unknown values land in the "other" bucket."""
-
-_HASH_READ_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -168,33 +165,61 @@ class PreparedUpload:
         self.close()
 
 
-def _salted_hash(source: PlaintextSource, account_ss58: str) -> bytes:
-    """First pass: BLAKE3 over ``account_ss58 || plaintext``."""
-    hasher = hashes.salted_hasher(account_ss58)
-    with source.open() as reader:
-        while chunk := reader.read(_HASH_READ_SIZE):
-            hasher.update(chunk)
-    return hasher.digest()
+class _SizedReader:
+    """Cap a reader at ``size`` bytes and hash whatever is actually encrypted.
+
+    ``encrypt_stream`` reads ``CHUNK_SIZE`` per full frame. A file that grew
+    after ``stat`` would otherwise contribute extra bytes to a to-EOF hash
+    while the ciphertext stopped at the declared size. Capping the read and
+    then peeking one extra byte makes that a ``ValueError`` instead.
+    """
+
+    def __init__(self, inner: IO[bytes], size: int, hasher: blake3.blake3) -> None:
+        self._inner = inner
+        self._left = size
+        self._hasher = hasher
+
+    def read(self, size: int = -1) -> bytes:
+        """Read up to ``size`` bytes, not past the declared plaintext length."""
+        if self._left <= 0:
+            return b""
+        want = self._left if size < 0 else min(size, self._left)
+        data = self._inner.read(want)
+        self._left -= len(data)
+        self._hasher.update(data)
+        return data
+
+    def reject_if_grown(self, declared: int) -> None:
+        """Raise if the inner stream still has bytes past ``declared``."""
+        if self._inner.read(1):
+            raise ValueError(
+                f"declared plaintext_size {declared}, file grew while it was being read"
+            )
 
 
-def _encrypt_to_spool(source: PlaintextSource, key: bytes) -> tuple[IO[bytes], str, int]:
-    """Second pass: encrypt into a spooled file, hashing the blob as it is written."""
+def _encrypt_to_spool(
+    source: PlaintextSource, key: bytes, account_ss58: str
+) -> tuple[IO[bytes], str, int, bytes]:
+    """Encrypt into a spool, hashing plaintext and ciphertext from the same read."""
     # Not a context manager: the blob outlives this function and is closed by
     # PreparedUpload, whose caller owns it for the length of the upload.
     blob: IO[bytes] = SpooledTemporaryFile(max_size=SPOOL_MAX)  # noqa: SIM115
-    hasher = blake3.blake3()
+    cipher_hasher = blake3.blake3()
+    salted = hashes.salted_hasher(account_ss58)
     written = 0
     try:
         with source.open() as reader:
-            for frame in file_cipher.encrypt_stream(reader, key, source.size):
-                hasher.update(frame)
+            bounded = _SizedReader(reader, source.size, salted)
+            for frame in file_cipher.encrypt_stream(bounded, key, source.size):
+                cipher_hasher.update(frame)
                 blob.write(frame)
                 written += len(frame)
+            bounded.reject_if_grown(source.size)
     except BaseException:
         blob.close()
         raise
     blob.seek(0)
-    return blob, hasher.hexdigest(), written
+    return blob, cipher_hasher.hexdigest(), written, salted.digest()
 
 
 def _revision_seq(spec: UploadSpec) -> int:
@@ -227,8 +252,9 @@ def prepare(identity: Identity, source: PlaintextSource, spec: UploadSpec) -> Pr
     revision_seq = _revision_seq(spec)
     key = identity.encryption_key
 
-    salted = _salted_hash(source, identity.account_ss58)
-    blob, ciphertext_hash, ciphertext_size = _encrypt_to_spool(source, key)
+    blob, ciphertext_hash, ciphertext_size, salted = _encrypt_to_spool(
+        source, key, identity.account_ss58
+    )
 
     manifest = Manifest(
         ss58_address=identity.account_ss58,
