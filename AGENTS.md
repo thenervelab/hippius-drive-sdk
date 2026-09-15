@@ -121,10 +121,12 @@ Re-read, re-classify, retry. That is expected during sync, not a defect.
 the two clients to put the same bytes on the wire; pick one for concurrency,
 not behaviour.
 
-`Client` probes for the fastest healthy region in `__init__`. `AsyncClient`
-cannot, because that would need a running loop: pass `server_url`, or
-`await pick_region_async()` from `hippius_drive._transport` and inject the
-transport. With no `server_url`, async defaults to the first region (EU).
+`Client` probes `/health` on each region in `REGIONS` order (EU, then US) and
+uses the first that answers, falling back to EU if every probe fails. That is
+preference order, not latency. `AsyncClient` cannot probe in the constructor
+(no running loop): pass `server_url`, or
+`server_url=await pick_region_async()` from `hippius_drive._transport` (it
+returns a URL, not a transport). With no `server_url`, async defaults to EU.
 
 ### Errors
 
@@ -250,7 +252,9 @@ secrets are present. Fork PRs skip e2e. The required check is the `ci` job.
 | `tests/vectors/` | Handshake with hcfs; file not present yet |
 
 Modules named `_foo` are private. Callers (and the CLI, except `_config`) stay
-on the public surface.
+on the public surface. The other documented private helper is
+`pick_region_async` in `_transport`; pass its URL as `server_url=`, do not
+inject it as `transport=`.
 
 ### Invariants — do not break these
 

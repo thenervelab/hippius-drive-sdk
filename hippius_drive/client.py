@@ -533,8 +533,9 @@ class Client:
             token: The bearer token the Hippius auth service issued. It must
                 resolve to ``identity.account_ss58``.
             identity: The account address and folder keys.
-            server_url: A specific server; otherwise the fastest healthy region
-                is probed once, here, rather than on every request.
+            server_url: A specific server; otherwise the first healthy region
+                in ``REGIONS`` order is probed once, here, rather than on
+                every request.
             timeout: Per-phase budget in seconds, or a full ``httpx.Timeout``.
                 A float also bounds the region probe, at most ``PROBE_TIMEOUT``.
             transport: A pre-built transport, mainly for tests.
@@ -950,7 +951,8 @@ class AsyncClient:
 
         Unlike :class:`Client`, a region is not probed in the constructor,
         because that would need a running event loop. Pass ``server_url``, or
-        build the transport yourself after awaiting ``pick_region_async``.
+        ``server_url=await pick_region_async()`` from
+        :mod:`hippius_drive._transport` (it returns a URL, not a transport).
 
         Args:
             token: The bearer token the Hippius auth service issued.
