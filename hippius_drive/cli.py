@@ -200,7 +200,8 @@ def whoami(obj: Context) -> None:
     click.echo(f"label        {identity.label}")
     click.echo(f"folder_hash  {identity.folder_hash}")
     click.echo(f"signing_key  {identity.verifying_key.hex()}")
-    with obj.client() as client:
+    token = _checked(obj.config.require_token)
+    with Client(token=token, identity=identity, server_url=obj.config.server_url) as client:
         client.folders.list()
     click.echo("token        accepted for this account")
 
@@ -234,6 +235,8 @@ def register(obj: Context, label: str | None, device_name: str | None) -> None:
 @click.pass_obj
 def ls(obj: Context, path: str, walk: bool, as_json: bool) -> None:
     """List one directory, or every file in the folder with --all."""
+    if path.endswith("/") and not path.startswith("/"):
+        path = path.rstrip("/")
     if walk and path:
         raise click.ClickException("ls --all lists the whole folder; omit PATH or drop --all")
     with obj.client() as client:
@@ -348,7 +351,7 @@ def search(
         lambda r: f"{r['size_bytes']:>12}  {r['folder_label'] or '-'}  {r['relative_path'] or '-'}",
     )
     if result.has_more:
-        click.echo("more hits not shown; pass --limit or page with offset", err=True)
+        click.echo("more hits not shown; pass --limit", err=True)
 
 
 @main.command()

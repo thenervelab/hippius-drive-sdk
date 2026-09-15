@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import random
+import sys
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import Any
 from urllib.parse import urlparse
 
@@ -187,7 +188,7 @@ class Transport:
             timeout: Per-phase budget in seconds, or a full ``httpx.Timeout``.
             sleep: Injected so tests do not actually wait out the backoff.
         """
-        if not token:
+        if not token or not token.strip():
             raise ValueError("token is required")
         _require_https_server(base_url)
         self.base_url = base_url.rstrip("/")
@@ -261,22 +262,19 @@ class Transport:
             TransportError: If the connection failed.
         """
         kwargs = prepare(request, self._token)
-        attempts = _attempts_for(request)
-        last: Exception | None = None
-        for attempt in range(1, attempts + 1):
-            try:
-                with self._client.stream(**kwargs) as response:
-                    if attempt == attempts or response.status_code not in _RETRYABLE_STATUSES:
-                        yield response
-                        return
-            except _RETRYABLE_EXCEPTIONS as exc:
-                last = exc
-            except httpx.HTTPError as exc:
-                raise _transport_error(exc) from exc
-            if attempt < attempts:
-                self._sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
-        assert last is not None  # noqa: S101 - the loop yields on any response
-        raise _transport_error(last)
+        cm, response = _acquire_sync_stream(self._client, kwargs, self._sleep, request)
+        try:
+            yield response
+        except httpx.HTTPError as exc:
+            with suppress(errors.TransportError):
+                _exit_sync_stream(cm, *sys.exc_info())
+            raise _transport_error(exc) from exc
+        except BaseException:
+            with suppress(httpx.HTTPError):
+                cm.__exit__(*sys.exc_info())
+            raise
+        else:
+            _exit_sync_stream(cm)
 
     def close(self) -> None:
         """Close the underlying connection pool."""
@@ -308,7 +306,7 @@ class AsyncTransport:
                 because anyio applies it to the whole request body.
             sleep: Injected so tests do not actually wait out the backoff.
         """
-        if not token:
+        if not token or not token.strip():
             raise ValueError("token is required")
         _require_https_server(base_url)
         self.base_url = base_url.rstrip("/")
@@ -380,26 +378,123 @@ class AsyncTransport:
             TransportError: If the connection failed.
         """
         kwargs = prepare(request, self._token)
-        attempts = _attempts_for(request)
-        last: Exception | None = None
-        for attempt in range(1, attempts + 1):
-            try:
-                async with self._client.stream(**kwargs) as response:
-                    if attempt == attempts or response.status_code not in _RETRYABLE_STATUSES:
-                        yield response
-                        return
-            except _RETRYABLE_EXCEPTIONS as exc:
-                last = exc
-            except httpx.HTTPError as exc:
-                raise _transport_error(exc) from exc
-            if attempt < attempts:
-                await self._sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
-        assert last is not None  # noqa: S101 - the loop yields on any response
-        raise _transport_error(last)
+        cm, response = await _acquire_async_stream(self._client, kwargs, self._sleep, request)
+        try:
+            yield response
+        except httpx.HTTPError as exc:
+            with suppress(errors.TransportError):
+                await _exit_async_stream(cm, *sys.exc_info())
+            raise _transport_error(exc) from exc
+        except BaseException:
+            with suppress(httpx.HTTPError):
+                await cm.__aexit__(*sys.exc_info())
+            raise
+        else:
+            await _exit_async_stream(cm)
 
     async def aclose(self) -> None:
         """Close the underlying connection pool."""
         await self._client.aclose()
+
+
+def _keep_stream(attempt: int, attempts: int, status: int) -> bool:
+    return attempt == attempts or status not in _RETRYABLE_STATUSES
+
+
+def _exit_sync_stream(cm: Any, *exc_info: Any) -> None:
+    """Close a sync httpx stream; map close-time HTTPError to TransportError."""
+    if not exc_info:
+        exc_info = (None, None, None)
+    try:
+        cm.__exit__(*exc_info)
+    except httpx.HTTPError as exc:
+        raise _transport_error(exc) from exc
+
+
+async def _exit_async_stream(cm: Any, *exc_info: Any) -> None:
+    """Async twin of :func:`_exit_sync_stream`."""
+    if not exc_info:
+        exc_info = (None, None, None)
+    try:
+        await cm.__aexit__(*exc_info)
+    except httpx.HTTPError as exc:
+        raise _transport_error(exc) from exc
+
+
+def _discard_sync_stream(cm: Any) -> Exception | None:
+    """Close a stream we will not yield. Close errors are retried; the GET is safe."""
+    try:
+        cm.__exit__(None, None, None)
+    except httpx.HTTPError as exc:
+        return exc
+    return None
+
+
+async def _discard_async_stream(cm: Any) -> Exception | None:
+    """Async twin of :func:`_discard_sync_stream`."""
+    try:
+        await cm.__aexit__(None, None, None)
+    except httpx.HTTPError as exc:
+        return exc
+    return None
+
+
+def _acquire_sync_stream(
+    client: httpx.Client,
+    kwargs: dict[str, Any],
+    sleep: Callable[[float], None],
+    request: Request,
+) -> tuple[Any, httpx.Response]:
+    """Open a stream, retrying connect/timeout/502-504 before the body is read."""
+    attempts = _attempts_for(request)
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            cm = client.stream(**kwargs)
+            response = cm.__enter__()
+        except _RETRYABLE_EXCEPTIONS as exc:
+            last = exc
+        except httpx.HTTPError as exc:
+            raise _transport_error(exc) from exc
+        else:
+            if _keep_stream(attempt, attempts, response.status_code):
+                return cm, response
+            discarded = _discard_sync_stream(cm)
+            if discarded is not None:
+                last = discarded
+        if attempt < attempts:
+            sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
+    assert last is not None  # noqa: S101 - a kept stream returns
+    raise _transport_error(last)
+
+
+async def _acquire_async_stream(
+    client: httpx.AsyncClient,
+    kwargs: dict[str, Any],
+    sleep: Callable[[float], Any],
+    request: Request,
+) -> tuple[Any, httpx.Response]:
+    """Async twin of :func:`_acquire_sync_stream`."""
+    attempts = _attempts_for(request)
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            cm = client.stream(**kwargs)
+            response = await cm.__aenter__()
+        except _RETRYABLE_EXCEPTIONS as exc:
+            last = exc
+        except httpx.HTTPError as exc:
+            raise _transport_error(exc) from exc
+        else:
+            if _keep_stream(attempt, attempts, response.status_code):
+                return cm, response
+            discarded = await _discard_async_stream(cm)
+            if discarded is not None:
+                last = discarded
+        if attempt < attempts:
+            await sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
+    assert last is not None  # noqa: S101 - a kept stream returns
+    raise _transport_error(last)
 
 
 def _probe(client: httpx.Client, base_url: str, timeout: float) -> bool:

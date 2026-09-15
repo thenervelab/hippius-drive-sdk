@@ -238,7 +238,7 @@ def prepare(identity: Identity, source: PlaintextSource, spec: UploadSpec) -> Pr
 
     Args:
         identity: The account and folder identity that signs the manifest.
-        source: The plaintext, which is read twice.
+        source: The plaintext; hashed and encrypted in one pass.
         spec: Path, revision, and source metadata.
 
     Returns:

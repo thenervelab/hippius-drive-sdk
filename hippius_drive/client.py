@@ -60,8 +60,17 @@ def _headers_info(response: httpx.Response) -> models.DownloadInfo:
 
 def _open_private(path: Path) -> IO[bytes]:
     """Create ``path`` owner-only, matching the mnemonic store."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    return os.fdopen(fd, "wb")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _raise_download_error(status: int, body: bytes, content_type: str) -> None:
@@ -299,16 +308,7 @@ class FileOps:
         Returns:
             The page.
         """
-        opts = options if options is not None else BrowseOptions()
-        if path:
-            path = hashes.normalize_relative_path(path)
-            opts = BrowseOptions(
-                path=path,
-                sort_by=opts.sort_by,
-                sort_order=opts.sort_order,
-                file_type=opts.file_type,
-                uploaded_by=opts.uploaded_by,
-            )
+        opts = _browse_options(path, options)
         return self._client.run(_ops.browse(self._client.identity, opts, offset, limit))
 
     def search(
@@ -510,6 +510,22 @@ class FileOps:
         return self._client.run(_ops.rename_files(identity, entries))
 
 
+def _browse_options(path: str, options: BrowseOptions | None) -> BrowseOptions:
+    """NFC-normalise the path that will actually be sent."""
+    opts = options if options is not None else BrowseOptions()
+    sent = path if path else opts.path
+    if not sent:
+        return opts
+    sent = hashes.normalize_relative_path(sent)
+    return BrowseOptions(
+        path=sent,
+        sort_by=opts.sort_by,
+        sort_order=opts.sort_order,
+        file_type=opts.file_type,
+        uploaded_by=opts.uploaded_by,
+    )
+
+
 def _probe_timeout(timeout: float | httpx.Timeout) -> float:
     """Bound the region probe by a float client timeout, never above the default."""
     if isinstance(timeout, httpx.Timeout):
@@ -553,6 +569,8 @@ class Client:
         """
         self.identity = identity
         if transport is None:
+            if not token or not token.strip():
+                raise ValueError("token is required")
             if server_url is None:
                 server_url = pick_region(timeout=_probe_timeout(timeout))
             transport = Transport(server_url, token, timeout)
@@ -757,16 +775,7 @@ class AsyncFileOps:
         Returns:
             The page.
         """
-        opts = options if options is not None else BrowseOptions()
-        if path:
-            path = hashes.normalize_relative_path(path)
-            opts = BrowseOptions(
-                path=path,
-                sort_by=opts.sort_by,
-                sort_order=opts.sort_order,
-                file_type=opts.file_type,
-                uploaded_by=opts.uploaded_by,
-            )
+        opts = _browse_options(path, options)
         return await self._client.run(_ops.browse(self._client.identity, opts, offset, limit))
 
     async def search(
