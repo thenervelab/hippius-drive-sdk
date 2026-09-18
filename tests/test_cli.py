@@ -509,17 +509,68 @@ def test_search_passes_the_filters(env: dict[str, str]) -> None:
 
 
 @respx.mock
-def test_search_notes_when_results_are_truncated(env: dict[str, str]) -> None:
-    respx.get(f"{BASE}/search_files/{SS58}").mock(
-        return_value=httpx.Response(
-            200,
-            json={"Success": {"files": [{**FILE_JSON, "folder_label": "Docs"}], "has_more": True}},
-        )
+def test_search_points_at_the_next_offset_when_results_are_truncated(
+    env: dict[str, str],
+) -> None:
+    # "pass --limit" stops being true at the server cap; the next page is the
+    # only thing that always works, and it starts after the hits that came back.
+    hit = {**FILE_JSON, "folder_label": "Docs"}
+    route = respx.get(f"{BASE}/search_files/{SS58}").mock(
+        return_value=httpx.Response(200, json={"Success": {"files": [hit, hit], "has_more": True}})
     )
-    result = run(["search", "report"], env)
+
+    result = run(["search", "report", "--offset", "200", "--limit", "500"], env)
+
     assert result.exit_code == 0
-    assert "more hits not shown" in result.output
-    assert "offset" not in result.output
+    params = dict(route.calls.last.request.url.params)
+    assert params["offset"] == "200"
+    assert params["limit"] == "500"
+    assert "more hits not shown; pass --offset 202" in result.output
+    assert "--limit" not in result.output
+
+
+@respx.mock
+def test_search_without_offset_starts_at_zero(env: dict[str, str]) -> None:
+    hit = {**FILE_JSON, "folder_label": "Docs"}
+    route = respx.get(f"{BASE}/search_files/{SS58}").mock(
+        return_value=httpx.Response(200, json={"Success": {"files": [hit], "has_more": True}})
+    )
+
+    result = run(["search", "report"], env)
+
+    assert dict(route.calls.last.request.url.params)["offset"] == "0"
+    assert "pass --offset 1" in result.output
+
+
+@respx.mock
+@pytest.mark.parametrize("term", ["a", "ab", "  ab  "])
+def test_search_refuses_a_term_the_server_would_not_match(env: dict[str, str], term: str) -> None:
+    # The server answers a 1-2 character term with an empty page. Printing
+    # nothing would read as "no such file", so say why and send nothing.
+    route = respx.get(f"{BASE}/search_files/{SS58}")
+
+    result = run(["search", term], env)
+
+    assert result.exit_code == 1
+    assert "too short" in result.output
+    assert "3 or more characters" in result.output
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_search_with_no_term_still_lists(env: dict[str, str]) -> None:
+    # No term is a filter-only listing, not a short query.
+    route = respx.get(f"{BASE}/search_files/{SS58}").mock(
+        return_value=httpx.Response(200, json={"Success": {"files": [], "has_more": False}})
+    )
+
+    assert run(["search", "--type", "image"], env).exit_code == 0
+    assert route.call_count == 1
+
+
+def test_listing_help_states_the_server_cap() -> None:
+    assert "200" in run(["search", "--help"]).output
+    assert "200" in run(["ls", "--help"]).output
 
 
 @respx.mock
