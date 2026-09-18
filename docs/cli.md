@@ -73,8 +73,10 @@ label is 200, not a conflict.
 ## Files
 
 ```bash
-hippius-drive ls                            # one directory level
+hippius-drive ls                            # one directory level, every entry
 hippius-drive ls work                       # a subdirectory
+hippius-drive ls work --limit 50            # one page only
+hippius-drive ls work --limit 50 --offset 50
 hippius-drive ls --all                      # every file in the folder
 hippius-drive ls --json
 
@@ -94,7 +96,11 @@ hippius-drive put report-v2.pdf work/report.pdf \
 
 `mv` looks the current revision up for you, so it needs no flags.
 
-`ls` shows directories first with recursive byte totals, then files. Note that
+`ls` shows directories first with recursive byte totals, then files. With no
+paging flags it lists the whole directory, fetching as many pages as that
+takes. `--limit` and `--offset` ask for a single page instead; the server
+returns at most 200 entries per page whatever `--limit` says, and when more
+remain `ls` prints the `--offset` that continues the listing. Note that
 files with no stored plaintext path do not appear in `ls` — use `ls --all`,
 which lists everything.
 
@@ -103,6 +109,7 @@ which lists everything.
 ```bash
 hippius-drive search report
 hippius-drive search --type image,.pdf --sort size_bytes --limit 50
+hippius-drive search report --limit 200 --offset 200   # the next page
 hippius-drive search invoice --json
 
 hippius-drive quota
@@ -111,6 +118,12 @@ hippius-drive quota --size 10485760         # would this many bytes fit?
 
 Search spans every folder on the account, not just the configured one, and each
 hit names the folder it came from.
+
+A page holds at most 200 hits (25 when `--limit` is omitted). When more remain,
+`search` prints the `--offset` of the next page; raising `--limit` past 200
+reveals nothing further. A term of one or two characters is refused locally
+with an explanation and no request is sent, because the server matches nothing
+on a term that short and an empty result would read as "no such file".
 
 ## Errors
 

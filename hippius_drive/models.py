@@ -35,6 +35,21 @@ Bytes = Annotated[
 """A byte field that round-trips through the JSON int-array wire form."""
 
 
+MAX_LISTING_PAGE_SIZE = 200
+"""Largest ``limit`` ``/browse`` and ``/search_files`` honour.
+
+The server coerces anything larger down to this rather than rejecting it, so
+a walk must advance by the rows a page actually returned, never by the limit
+it asked for. ``/get_state`` is a separate, larger cap (5000).
+"""
+
+MIN_SEARCH_QUERY_LENGTH = 3
+"""Shortest ``q``, after trimming, that ``/search_files`` will match on.
+
+A shorter term is not an error: the server answers 200 with an empty page.
+"""
+
+
 class _Wire(BaseModel):
     """Base for every wire model: tolerate unknown fields, keep byte semantics."""
 
@@ -92,6 +107,9 @@ class SearchFilters:
 
     Attributes:
         q: Case-insensitive substring of the name or path; max 256 chars.
+            A term shorter than :data:`MIN_SEARCH_QUERY_LENGTH` characters
+            after trimming matches nothing: the server returns an empty page
+            rather than an error.
         file_type: Categories and explicit extensions; a file matches any.
         size_min: Inclusive lower bound on plaintext size.
         size_max: Inclusive upper bound on plaintext size.
@@ -215,7 +233,14 @@ class RemoteFileEntry(_Wire):
 
 
 class _Page(_Wire):
-    """Shared pagination tail. Page on ``has_more``, never on ``total_count``."""
+    """Shared pagination tail. Page on ``has_more``, never on ``total_count``.
+
+    ``has_more`` is exact. ``total_count`` is approximate and can lag a write,
+    so a walk that stops on it can stop early. ``limit`` and ``offset`` echo
+    what the server applied, which is not always what was asked for:
+    ``/browse`` and ``/search_files`` coerce ``limit`` down to
+    :data:`MAX_LISTING_PAGE_SIZE`.
+    """
 
     total_count: int | None = None
     has_more: bool = False
@@ -256,6 +281,10 @@ class BrowseFolderEntry(_Wire):
 class BrowseResult(_Page):
     """A page of ``/browse``.
 
+    At most :data:`MAX_LISTING_PAGE_SIZE` entries, and 50 when the request
+    names no ``limit``. Folders and files share one offset space, so the next
+    page starts at ``offset + len(folders) + len(files)``.
+
     Attributes:
         ss58_address: Echo of the requested account.
         folder_hash: Echo of the requested folder.
@@ -285,6 +314,9 @@ class SearchHit(RemoteFileEntry):
 
 class SearchResult(_Page):
     """A page of ``/search_files``.
+
+    At most :data:`MAX_LISTING_PAGE_SIZE` hits, and 25 when the request names
+    no ``limit``.
 
     Attributes:
         ss58_address: Echo of the requested account.
