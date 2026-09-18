@@ -20,7 +20,13 @@ from hippius_drive._config import Config
 from hippius_drive.client import Client
 from hippius_drive.crypto import kdf, mnemonic_store
 from hippius_drive.identity import Identity
-from hippius_drive.models import RenameSpec, SearchFilters
+from hippius_drive.models import (
+    MAX_LISTING_PAGE_SIZE,
+    BrowseFolderEntry,
+    RemoteFileEntry,
+    RenameSpec,
+    SearchFilters,
+)
 
 FILE_ID_HEX_LEN = 64
 """Length of a hex-encoded path_hash, which is how a file id is spelled."""
@@ -231,26 +237,71 @@ def register(obj: Context, label: str | None, device_name: str | None) -> None:
 @main.command()
 @click.argument("path", default="")
 @click.option("--all", "walk", is_flag=True, help="List every file, not one directory.")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=None,
+    help=f"Show one page of at most this many entries (server max {MAX_LISTING_PAGE_SIZE}).",
+)
+@click.option(
+    "--offset",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Show one page starting at this entry.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
 @click.pass_obj
-def ls(obj: Context, path: str, walk: bool, as_json: bool) -> None:
-    """List one directory, or every file in the folder with --all."""
+def ls(
+    obj: Context, path: str, walk: bool, limit: int | None, offset: int | None, as_json: bool
+) -> None:
+    """List one directory, or every file in the folder with --all.
+
+    With neither --limit nor --offset the whole directory is listed, however
+    many pages that takes. Either flag asks for a single page instead.
+    """
     if path.endswith("/") and not path.startswith("/"):
         path = path.rstrip("/")
     if walk and path:
         raise click.ClickException("ls --all lists the whole folder; omit PATH or drop --all")
+
+    one_page = limit is not None or offset is not None
+    if walk and one_page:
+        raise click.ClickException("ls --all lists the whole folder; drop --limit and --offset")
+
+    next_offset = None
     with obj.client() as client:
         if walk:
             rows = [f.model_dump(mode="json") for f in client.files.iter_state()]
-            has_more = False
+        elif one_page:
+            rows, next_offset = _ls_page(client, path, offset or 0, limit)
         else:
-            result = client.files.browse(path)
-            rows = [{"kind": "dir", **f.model_dump(mode="json")} for f in result.folders]
-            rows += [{"kind": "file", **f.model_dump(mode="json")} for f in result.files]
-            has_more = result.has_more
+            rows = [_ls_row(entry) for entry in client.files.iter_browse(path)]
+
     _emit(rows, as_json, _ls_line)
-    if has_more:
-        click.echo("more entries not shown", err=True)
+    if next_offset is not None:
+        click.echo(f"more entries not shown; pass --offset {next_offset}", err=True)
+
+
+def _ls_page(
+    client: Client, path: str, offset: int, limit: int | None
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Fetch one explicit page and say where the next one starts, if there is one.
+
+    The next offset counts the entries that came back, not ``limit``: the
+    server may return fewer than were asked for.
+    """
+    result = client.files.browse(path, offset=offset, limit=limit)
+    entries = [*result.folders, *result.files]
+    rows = [_ls_row(entry) for entry in entries]
+
+    # An empty page has nowhere further to point, whatever has_more claims.
+    next_offset = offset + len(entries) if result.has_more and entries else None
+    return rows, next_offset
+
+
+def _ls_row(entry: BrowseFolderEntry | RemoteFileEntry) -> dict[str, Any]:
+    kind = "dir" if isinstance(entry, BrowseFolderEntry) else "file"
+    return {"kind": kind, **entry.model_dump(mode="json")}
 
 
 def _ls_line(row: dict[str, Any]) -> str:
