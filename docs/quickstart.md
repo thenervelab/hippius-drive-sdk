@@ -206,9 +206,7 @@ The recipient joins with their own master phrase and the account their token
 resolves to. That address is not derived from the phrase.
 
 ```python
-accepted = member.drives.accept(
-    invite.invite_url, member_phrase, member_ss58=member_account
-)
+accepted = member.drives.accept(invite.invite_url, member_phrase, member_ss58=member_account)
 member_identity = Identity.for_shared_drive(
     accepted.folder_mnemonic,
     owner_ss58=accepted.owner_ss58,
