@@ -12,7 +12,8 @@ break on a deploy it had nothing to do with.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
@@ -122,7 +123,8 @@ class Manifest(_Wire):
     from ``ciphertext_hash``, not the rest of these fields.
 
     Attributes:
-        ss58_address: The account namespace; must match the token's identity.
+        ss58_address: The drive namespace. The token's account, or the owner
+            when a member writes into a shared drive.
         folder_hash: ``hex(SHA-256(label))[:16]``.
         ciphertext_hash: Hex BLAKE3 of the whole blob.
         size_bytes: Plaintext size.
@@ -630,3 +632,447 @@ class DownloadInfo(_Wire):
     size_bytes: int = 0
     revision_id: Bytes | None = None
     revision_seq: int = 0
+
+
+class ShareTtl(str, Enum):
+    """How long a share link stays reachable. The server applies the clock.
+
+    The wire values are a closed set shared with hcfs. An unknown value is a
+    400 rather than a lifetime nobody chose.
+    """
+
+    HOURS_24 = "24h"
+    DAYS_7 = "7d"
+    DAYS_30 = "30d"
+    NEVER = "never"
+
+
+class Capabilities(_Wire):
+    """``GET /v1/capabilities``. Absent flags mean false.
+
+    Attributes:
+        shares: File-share routes are mounted.
+        folder_shares: Folder-share routes are mounted.
+        folder_share_revoke_by_hash: Revoke and expiry by ``token_hash``.
+        share_owner_wrap: Owner-wrap upload is mounted.
+        member_folder_shares: A member may mint a folder share on a shared drive.
+    """
+
+    shares: bool = False
+    folder_shares: bool = False
+    folder_share_revoke_by_hash: bool = False
+    share_owner_wrap: bool = False
+    member_folder_shares: bool = False
+
+
+class ExpiryResult(_Wire):
+    """Expiry returned by a folder-share TTL update. The token is not repeated.
+
+    Attributes:
+        expires_at: RFC 3339, or None when the share does not expire.
+    """
+
+    expires_at: str | None = None
+
+
+class MintedShare(_Wire):
+    """Token returned once by share create, init, and chunked complete.
+
+    Attributes:
+        share_token: The plaintext capability. The server stores only its hash
+            for folder shares; file-share listings do echo this token.
+        expires_at: RFC 3339, or None when the share does not expire.
+    """
+
+    share_token: str
+    expires_at: str | None = None
+
+
+class ShareSummary(_Wire):
+    """One row of ``GET /v1/shares``.
+
+    Attributes:
+        share_token: Plaintext token. File-share listings return it.
+        filename: Plaintext name, for the owner's own list.
+        plaintext_size: Declared plaintext bytes.
+        ciphertext_size: Stored blob bytes.
+        mime_type: The type sent at mint time.
+        created_at: RFC 3339.
+        expires_at: None when the share does not expire.
+        owner_wrap: Standard base64 of the mnemonic-sealed secret, when uploaded.
+    """
+
+    share_token: str
+    filename: str = ""
+    plaintext_size: int = 0
+    ciphertext_size: int = 0
+    mime_type: str = ""
+    created_at: str = ""
+    expires_at: str | None = None
+    owner_wrap: str | None = None
+
+
+class ShareMeta(_Wire):
+    """Anonymous ``GET /v1/shares/{token}/meta``. The filename stays encrypted.
+
+    Attributes:
+        ciphertext_size: Stored blob bytes.
+        plaintext_size: Declared plaintext bytes.
+        filename_ct: Standard base64 of the encrypted filename.
+        filename_nonce: Standard base64 of the 24-byte nonce.
+        mime_type: The type sent at mint time.
+        expires_at: None when the share does not expire.
+    """
+
+    ciphertext_size: int = 0
+    plaintext_size: int = 0
+    filename_ct: str = ""
+    filename_nonce: str = ""
+    mime_type: str = ""
+    expires_at: str | None = None
+
+
+class OwnerWrapsResult(_Wire):
+    """How many owner-wrap rows the server stored. Unknown tokens are skipped.
+
+    Attributes:
+        applied: Rows updated.
+    """
+
+    applied: int = 0
+
+
+class FolderShare(_Wire):
+    """One row of ``GET /v1/folder-shares``. The listing has no plaintext token.
+
+    Attributes:
+        token_hash: Blake3 hex of the token.
+        folder_hash: The drive the share scopes.
+        path_prefix: "" shares the whole drive.
+        display_name: Name shown to the recipient.
+        created_at: RFC 3339.
+        expires_at: None when the share does not expire.
+        revoked_at: Set once the owner has revoked it.
+        owner_wrap: Present only for the account that minted the share.
+        owner_ss58: Whose drive the share reads.
+        minted_by_ss58: Who published the link.
+    """
+
+    token_hash: str
+    folder_hash: str = ""
+    path_prefix: str = ""
+    display_name: str = ""
+    created_at: str = ""
+    expires_at: str | None = None
+    revoked_at: str | None = None
+    owner_wrap: str | None = None
+    owner_ss58: str = ""
+    minted_by_ss58: str = ""
+
+
+class FolderShareMeta(_Wire):
+    """Anonymous folder-share header.
+
+    Attributes:
+        display_name: Name shown to the recipient.
+        expires_at: None when the share does not expire.
+    """
+
+    display_name: str = ""
+    expires_at: str | None = None
+
+
+class FolderShareFile(_Wire):
+    """One file in a folder-share listing.
+
+    Attributes:
+        name: The last path segment.
+        path: Path relative to the share prefix.
+        size_bytes: Plaintext size.
+        uploaded_at: RFC 3339.
+    """
+
+    name: str = ""
+    path: str = ""
+    size_bytes: int = 0
+    uploaded_at: str = ""
+
+
+class FolderShareDir(_Wire):
+    """One directory in a folder-share listing.
+
+    Attributes:
+        name: The last path segment.
+        file_count: Files anywhere beneath this directory.
+        total_bytes: Recursive plaintext bytes.
+        created_at: RFC 3339, or None when the server has no date.
+    """
+
+    name: str = ""
+    file_count: int = 0
+    total_bytes: int = 0
+    created_at: str | None = None
+
+
+class FolderSharePage(_Wire):
+    """One page of ``GET /v1/folder-shares/{token}/browse``.
+
+    Attributes:
+        directories: Child directories. Empty on continuation pages.
+        files: Files on this page.
+        total_count: Entries represented by this response.
+        has_more: Another file page follows. Page on this, not ``total_count``.
+        offset: Echo of the requested offset.
+        limit: Echo of the page size.
+    """
+
+    directories: list[FolderShareDir] = []
+    files: list[FolderShareFile] = []
+    total_count: int = 0
+    has_more: bool = False
+    offset: int = 0
+    limit: int = 0
+
+
+class InviteMint(_Wire):
+    """The one response that contains a plaintext invite token.
+
+    Attributes:
+        invite_token: The join capability. The server stores blake3 of it.
+        invite_id: That blake3 hex, when the server returns it.
+    """
+
+    invite_token: str
+    invite_id: str | None = None
+
+
+class InviteMeta(_Wire):
+    """Anonymous preview of an invite, shown before the recipient accepts.
+
+    Attributes:
+        owner_ss58: The drive owner.
+        owner_name: Display name, when the owner has one.
+        folder_hash: The drive id.
+        display_label: The owner's registry label, or the hash.
+        expires_at: RFC 3339.
+        role: The role an accept would grant.
+        valid: False when an accept would return 410.
+    """
+
+    owner_ss58: str = ""
+    owner_name: str | None = None
+    folder_hash: str = ""
+    display_label: str = ""
+    expires_at: str = ""
+    role: str = "writer"
+    valid: bool = False
+
+
+class AcceptResult(_Wire):
+    """What ``POST /v1/drive-invites/{token}/accept`` returns.
+
+    Attributes:
+        owner_ss58: The drive owner.
+        folder_hash: The drive id.
+        role: The role granted.
+        already_owner: True when the owner opened their own invite.
+    """
+
+    owner_ss58: str
+    folder_hash: str
+    role: str = "writer"
+    already_owner: bool = False
+
+
+class DriveMember(_Wire):
+    """One member of a drive. The grant blob is not in this listing.
+
+    Attributes:
+        member_ss58: The member's account.
+        role: ``reader``, ``writer``, or ``manager``.
+        created_at: RFC 3339.
+        member_name: Display name, when known.
+        member_email: Shown to the owner and managers only.
+    """
+
+    member_ss58: str
+    role: str = "writer"
+    created_at: str = ""
+    member_name: str | None = None
+    member_email: str | None = None
+
+
+class DriveMembers(_Wire):
+    """``GET /v1/drives/{folder_hash}/members``.
+
+    Attributes:
+        members: The drive's members. The owner is not a row.
+    """
+
+    members: list[DriveMember] = []
+
+
+class DriveInvite(_Wire):
+    """One invite row. ``sealed_token`` is absent unless this caller may read it.
+
+    Attributes:
+        invite_id: Blake3 hex of the token.
+        sealed_token: Standard base64 of the client-sealed token.
+        role: The role the invite grants.
+        minted_by: Who minted it.
+        expires_at: RFC 3339.
+        max_uses: How many distinct members may join.
+        use_count: How many have joined.
+        revoked: The owner has revoked it.
+        valid: False when revoked, expired, or exhausted.
+        created_at: RFC 3339.
+    """
+
+    invite_id: str
+    sealed_token: str | None = None
+    role: str = "writer"
+    minted_by: str = ""
+    expires_at: str = ""
+    max_uses: int = 0
+    use_count: int = 0
+    revoked: bool = False
+    valid: bool = False
+    created_at: str = ""
+
+
+class DriveInvites(_Wire):
+    """``GET /v1/drives/{folder_hash}/invites``.
+
+    Attributes:
+        invites: Newest first, including spent rows.
+        truncated: True when the server returned only the newest 500.
+    """
+
+    invites: list[DriveInvite] = []
+    truncated: bool = False
+
+
+class DriveMembershipWire(_Wire):
+    """One drive the caller belongs to, grant still sealed.
+
+    Attributes:
+        owner_ss58: The drive owner.
+        folder_hash: The drive id.
+        role: The caller's role.
+        grant_blob: Standard base64 of the sealed folder phrase. Empty when absent.
+        display_label: The owner's label for the drive.
+        created_at: RFC 3339.
+        frozen: The owner's account is limited. Reads still work.
+        frozen_until: RFC 3339 end of a grace window, when recorded.
+        member_count: Invitees. The owner is not counted.
+        owner_name: The owner's display name.
+    """
+
+    owner_ss58: str
+    folder_hash: str
+    role: str = "writer"
+    grant_blob: str = ""
+    display_label: str = ""
+    created_at: str = ""
+    frozen: bool = False
+    frozen_until: str | None = None
+    member_count: int = 0
+    owner_name: str | None = None
+
+
+class DriveMembershipsWire(_Wire):
+    """``GET /v1/drive-memberships``.
+
+    Attributes:
+        memberships: Drives the caller has joined.
+    """
+
+    memberships: list[DriveMembershipWire] = []
+
+
+@dataclass(frozen=True)
+class CreatedShare:
+    """A share link. ``share_url`` already contains the key fragment.
+
+    Attributes:
+        share_token: The plaintext token. Store it; folder-share listings will not.
+        share_url: The console URL to hand to the recipient.
+        expires_at: RFC 3339, or None when the share does not expire.
+    """
+
+    share_token: str
+    share_url: str
+    expires_at: str | None = None
+
+
+@dataclass(frozen=True)
+class OpenedShare:
+    """Plaintext read back from a file-share URL.
+
+    Attributes:
+        filename: Decrypted from the share metadata.
+        mime_type: The type stored with the share.
+        data: The file contents.
+        expires_at: RFC 3339, or None when the share does not expire.
+    """
+
+    filename: str
+    mime_type: str
+    data: bytes = field(repr=False)
+    expires_at: str | None = None
+
+
+@dataclass(frozen=True)
+class CreatedInvite:
+    """An invite link. The fragment is the drive key and is not stored server-side.
+
+    Attributes:
+        invite_token: The plaintext join capability.
+        invite_url: ``{console}/invite/{token}#k={entropy}``.
+        invite_id: Blake3 hex of the token.
+    """
+
+    invite_token: str
+    invite_url: str
+    invite_id: str
+
+
+@dataclass(frozen=True)
+class AcceptedInvite:
+    """A drive the caller just joined, plus the folder phrase the link carried.
+
+    Attributes:
+        owner_ss58: The drive owner. Paths and ``salted_hash`` use this.
+        folder_hash: The owner's folder id.
+        role: The role granted.
+        folder_mnemonic: The owner's folder phrase. Pass it to
+            ``Identity.for_shared_drive``.
+        already_owner: True when the owner opened their own invite.
+    """
+
+    owner_ss58: str
+    folder_hash: str
+    role: str
+    folder_mnemonic: str = field(repr=False)
+    already_owner: bool = False
+
+
+@dataclass(frozen=True)
+class DriveMembership:
+    """A joined drive with the folder phrase opened from its grant.
+
+    Attributes:
+        owner_ss58: The drive owner.
+        folder_hash: The owner's folder id.
+        role: The caller's role.
+        display_label: The owner's label for the drive.
+        folder_mnemonic: Opened phrase, or None when the row has no grant.
+        frozen: The owner's account is limited.
+    """
+
+    owner_ss58: str
+    folder_hash: str
+    role: str
+    display_label: str
+    folder_mnemonic: str | None = field(default=None, repr=False)
+    frozen: bool = False

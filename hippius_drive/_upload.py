@@ -245,9 +245,10 @@ def prepare(identity: Identity, source: PlaintextSource, spec: UploadSpec) -> Pr
         The prepared upload; close it, or use it as a context manager.
 
     Raises:
-        ValueError: If the relative path is invalid, or a replacement was
-            requested without a ``revision_seq``.
+        ValueError: If the relative path is invalid, a replacement was
+            requested without a ``revision_seq``, or the identity is a reader.
     """
+    identity.require_writer()
     relative_path = hashes.normalize_relative_path(spec.relative_path)
     revision_seq = _revision_seq(spec)
     key = identity.encryption_key

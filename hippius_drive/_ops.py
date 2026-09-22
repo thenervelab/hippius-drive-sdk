@@ -74,7 +74,11 @@ def register_folder(
 
     Returns:
         The operation.
+
+    Raises:
+        ValueError: If ``identity`` is a shared-drive member.
     """
+    identity.require_owner()
     name, folder_hash = _folder_hash_for(identity, label)
     return Op(
         build.register_folder(identity.account_ss58, folder_hash, name, device_name),
@@ -90,7 +94,11 @@ def list_folders(identity: Identity) -> Op[models.ListFoldersResult]:
 
     Returns:
         The operation.
+
+    Raises:
+        ValueError: If ``identity`` is a shared-drive member.
     """
+    identity.require_owner()
     return Op(build.list_folders(identity.account_ss58), _parser(models.ListFoldersResult))
 
 
@@ -105,7 +113,11 @@ def unregister_folder(
 
     Returns:
         The operation.
+
+    Raises:
+        ValueError: If ``identity`` is a shared-drive member.
     """
+    identity.require_owner()
     _, folder_hash = _folder_hash_for(identity, label)
     return Op(
         build.unregister_folder(identity.account_ss58, folder_hash),
@@ -200,7 +212,13 @@ def search(
         The operation.
     """
     return Op(
-        build.search_files(identity.account_ss58, filters, offset, limit),
+        build.search_files(
+            identity.account_ss58,
+            filters,
+            offset,
+            limit,
+            identity.scoped_folder_hash(),
+        ),
         _parser(models.SearchResult),
     )
 
@@ -214,7 +232,11 @@ def user_summary(identity: Identity) -> Op[models.UserSummaryResult]:
     Returns:
         The operation.
     """
-    return Op(build.get_user_summary(identity.account_ss58), _parser(models.UserSummaryResult))
+    scope = identity.scoped_folder_hash()
+    return Op(
+        build.get_user_summary(identity.account_ss58, scope),
+        _parser(models.UserSummaryResult),
+    )
 
 
 def file_type_summary(identity: Identity) -> Op[models.FileTypeSummary]:
@@ -226,7 +248,11 @@ def file_type_summary(identity: Identity) -> Op[models.FileTypeSummary]:
     Returns:
         The operation.
     """
-    return Op(build.get_file_type_summary(identity.account_ss58), _parser(models.FileTypeSummary))
+    scope = identity.scoped_folder_hash()
+    return Op(
+        build.get_file_type_summary(identity.account_ss58, scope),
+        _parser(models.FileTypeSummary),
+    )
 
 
 def source_summary(identity: Identity) -> Op[models.SourceSummary]:
@@ -238,7 +264,8 @@ def source_summary(identity: Identity) -> Op[models.SourceSummary]:
     Returns:
         The operation.
     """
-    return Op(build.get_source_summary(identity.account_ss58), _parser(models.SourceSummary))
+    scope = identity.scoped_folder_hash()
+    return Op(build.get_source_summary(identity.account_ss58, scope), _parser(models.SourceSummary))
 
 
 def can_upload(identity: Identity, size_bytes: int) -> Op[models.CanUploadResult]:
@@ -297,7 +324,11 @@ def delete_file(identity: Identity, file_id: str) -> Op[models.DeleteResult]:
 
     Returns:
         The operation.
+
+    Raises:
+        ValueError: If ``identity`` is a reader.
     """
+    identity.require_writer()
     return Op(
         build.delete(identity.account_ss58, identity.folder_hash, file_id),
         _parser(models.DeleteResult),
@@ -319,8 +350,9 @@ def delete_files(
 
     Raises:
         ValueError: If the batch exceeds the server cap, which would otherwise
-            cost a round trip to learn.
+            cost a round trip to learn, or if ``identity`` is a reader.
     """
+    identity.require_writer()
     if len(file_ids) > MAX_BATCH_DELETE:
         raise ValueError(f"batch delete takes at most {MAX_BATCH_DELETE} ids, got {len(file_ids)}")
     return Op(
@@ -345,8 +377,9 @@ def rename_files(
         The operation.
 
     Raises:
-        ValueError: If the batch is empty.
+        ValueError: If the batch is empty, or if ``identity`` is a reader.
     """
+    identity.require_writer()
     if not renames:
         raise ValueError("rename needs at least one entry")
     ordered = sorted(renames, key=lambda r: r.old_path_hash)
@@ -436,3 +469,323 @@ def delete_session(session_id: str) -> Op[models.DeleteSessionResult]:
         The operation.
     """
     return Op(build.delete_session(session_id), _parser(models.DeleteSessionResult))
+
+
+def _rows(model: type[M]) -> Callable[[Any], list[M]]:
+    """Parse a bare JSON array into ``model`` rows."""
+
+    def parse(payload: Any) -> list[M]:
+        rows = payload if payload is not None else []
+        if not isinstance(rows, list):
+            raise errors.InvalidResponse(f"expected a list of {model.__name__}")
+        try:
+            return [model.model_validate(item) for item in rows]
+        except ValidationError as exc:
+            raise errors.InvalidResponse(f"could not parse {model.__name__}: {exc}") from exc
+
+    return parse
+
+
+def _ignored(payload: Any) -> None:
+    """Accept an empty 204. The body carries nothing the caller needs."""
+    del payload
+
+
+def capabilities() -> Op[models.Capabilities]:
+    """Read share and shared-drive feature flags."""
+    return Op(build.capabilities(), _parser(models.Capabilities))
+
+
+def create_share(metadata_json: bytes, ciphertext: bytes) -> Op[models.MintedShare]:
+    """Upload one file share in a single multipart request.
+
+    Args:
+        metadata_json: The metadata field.
+        ciphertext: The framed blob.
+    """
+    return Op(build.create_share(metadata_json, ciphertext), _parser(models.MintedShare))
+
+
+def init_share(body: dict[str, Any]) -> Op[models.MintedShare]:
+    """Open a chunked file share.
+
+    Args:
+        body: Sizes, filename fields, chunk count, and ttl.
+    """
+    return Op(build.init_share(body), _parser(models.MintedShare))
+
+
+def put_share_chunk(token: str, index: int, data: bytes) -> Op[models.UploadChunkResult]:
+    """Send one share ciphertext chunk.
+
+    Args:
+        token: The token from init.
+        index: Zero-based chunk index.
+        data: The ciphertext slice.
+    """
+    return Op(build.put_share_chunk(token, index, data), _parser(models.UploadChunkResult))
+
+
+def complete_share(token: str) -> Op[models.MintedShare]:
+    """Finish a chunked file share.
+
+    Args:
+        token: The token from init.
+    """
+    return Op(build.complete_share(token), _parser(models.MintedShare))
+
+
+def list_shares() -> Op[list[models.ShareSummary]]:
+    """List the caller's file shares."""
+    return Op(build.list_shares(), _rows(models.ShareSummary))
+
+
+def revoke_share(token: str) -> Op[None]:
+    """Revoke a file share.
+
+    Args:
+        token: The plaintext share token.
+    """
+    return Op(build.revoke_share(token), _ignored)
+
+
+def update_share_ttl(token: str, ttl: str) -> Op[models.MintedShare]:
+    """Change a file share's expiry.
+
+    Args:
+        token: The plaintext share token.
+        ttl: ``24h``, ``7d``, ``30d``, or ``never``.
+    """
+    return Op(build.update_share_ttl(token, ttl), _parser(models.MintedShare))
+
+
+def share_meta(token: str) -> Op[models.ShareMeta]:
+    """Read anonymous file-share metadata.
+
+    Args:
+        token: The plaintext share token.
+    """
+    return Op(build.share_meta(token), _parser(models.ShareMeta))
+
+
+def share_blob(token: str) -> Request:
+    """The anonymous file-share download. The body is streamed.
+
+    Args:
+        token: The plaintext share token.
+    """
+    return build.share_blob(token)
+
+
+def put_file_owner_wraps(wraps: list[dict[str, str]]) -> Op[models.OwnerWrapsResult]:
+    """Store mnemonic-sealed file-share secrets.
+
+    Args:
+        wraps: ``{"token", "wrap"}`` entries.
+    """
+    return Op(build.put_file_owner_wraps(wraps), _parser(models.OwnerWrapsResult))
+
+
+def create_folder_share(body: dict[str, Any]) -> Op[models.MintedShare]:
+    """Mint a folder share. Nothing is uploaded.
+
+    Args:
+        body: Drive, prefix, display name, and ttl.
+    """
+    return Op(build.create_folder_share(body), _parser(models.MintedShare))
+
+
+def list_folder_shares() -> Op[list[models.FolderShare]]:
+    """List folder shares the caller controls."""
+    return Op(build.list_folder_shares(), _rows(models.FolderShare))
+
+
+def revoke_folder_share(token: str) -> Op[None]:
+    """Revoke a folder share by its plaintext token.
+
+    Args:
+        token: The plaintext token.
+    """
+    return Op(build.revoke_folder_share(token), _ignored)
+
+
+def revoke_folder_share_by_hash(token_hash: str) -> Op[None]:
+    """Revoke a folder share by the hash the listing returns.
+
+    Args:
+        token_hash: 64 lowercase hex characters.
+    """
+    return Op(build.revoke_folder_share_by_hash(token_hash), _ignored)
+
+
+def update_folder_share_ttl(token: str, ttl: str) -> Op[models.ExpiryResult]:
+    """Change a folder share's expiry by plaintext token.
+
+    Args:
+        token: The plaintext token.
+        ttl: ``24h``, ``7d``, ``30d``, or ``never``.
+    """
+    return Op(build.update_folder_share_ttl(token, ttl), _parser(models.ExpiryResult))
+
+
+def update_folder_share_ttl_by_hash(token_hash: str, ttl: str) -> Op[models.ExpiryResult]:
+    """Change a folder share's expiry by ``token_hash``.
+
+    Args:
+        token_hash: 64 lowercase hex characters.
+        ttl: ``24h``, ``7d``, ``30d``, or ``never``.
+    """
+    return Op(
+        build.update_folder_share_ttl_by_hash(token_hash, ttl),
+        _parser(models.ExpiryResult),
+    )
+
+
+def put_folder_owner_wraps(wraps: list[dict[str, str]]) -> Op[models.OwnerWrapsResult]:
+    """Store mnemonic-sealed folder-share secrets.
+
+    Args:
+        wraps: ``{"token_hash", "wrap"}`` entries.
+    """
+    return Op(build.put_folder_owner_wraps(wraps), _parser(models.OwnerWrapsResult))
+
+
+def folder_share_meta(token: str) -> Op[models.FolderShareMeta]:
+    """Read anonymous folder-share metadata.
+
+    Args:
+        token: The plaintext token.
+    """
+    return Op(build.folder_share_meta(token), _parser(models.FolderShareMeta))
+
+
+def folder_share_browse(
+    token: str, path: str = "", offset: int = 0, limit: int | None = None
+) -> Op[models.FolderSharePage]:
+    """List one directory inside a folder share.
+
+    Args:
+        token: The plaintext token.
+        path: Directory relative to the share prefix.
+        offset: Starting file index.
+        limit: Page size.
+    """
+    return Op(
+        build.folder_share_browse(token, path, offset, limit),
+        _parser(models.FolderSharePage),
+    )
+
+
+def folder_share_blob(token: str, path: str) -> Request:
+    """The anonymous folder-share download. The body is streamed.
+
+    Args:
+        token: The plaintext token.
+        path: File path relative to the share prefix.
+    """
+    return build.folder_share_blob(token, path)
+
+
+def create_drive_invite(body: dict[str, Any]) -> Op[models.InviteMint]:
+    """Mint a shared-drive invite.
+
+    Args:
+        body: Folder hash, role, and optional lifetime and owner.
+    """
+    return Op(build.create_drive_invite(body), _parser(models.InviteMint))
+
+
+def seal_drive_invite(
+    folder_hash: str, invite_id: str, sealed_token: str, owner: str | None
+) -> Op[None]:
+    """Attach the client-sealed invite token. A failure does not unmint the invite.
+
+    Args:
+        folder_hash: The drive id.
+        invite_id: Blake3 hex of the token.
+        sealed_token: Standard base64 of the sealed JSON.
+        owner: Set when a manager seals on someone else's drive.
+    """
+    request = build.seal_drive_invite(folder_hash, invite_id, sealed_token, owner)
+    return Op(request, _ignored)
+
+
+def list_drive_invites(folder_hash: str, owner: str | None) -> Op[models.DriveInvites]:
+    """List a drive's invites.
+
+    Args:
+        folder_hash: The drive id.
+        owner: Set when a manager lists someone else's drive.
+    """
+    return Op(build.list_drive_invites(folder_hash, owner), _parser(models.DriveInvites))
+
+
+def revoke_drive_invite(folder_hash: str, invite_id: str, owner: str | None) -> Op[None]:
+    """Revoke an invite by its id.
+
+    Args:
+        folder_hash: The drive id.
+        invite_id: Blake3 hex of the token.
+        owner: Set when a manager revokes someone else's invite.
+    """
+    return Op(build.revoke_drive_invite(folder_hash, invite_id, owner), _ignored)
+
+
+def list_drive_members(folder_hash: str, owner: str | None) -> Op[models.DriveMembers]:
+    """List a drive's members.
+
+    Args:
+        folder_hash: The drive id.
+        owner: Set when the caller is a member rather than the owner.
+    """
+    return Op(build.list_drive_members(folder_hash, owner), _parser(models.DriveMembers))
+
+
+def remove_drive_member(folder_hash: str, member_ss58: str, owner: str | None) -> Op[None]:
+    """Remove a member, or leave when ``member_ss58`` is the caller.
+
+    Args:
+        folder_hash: The drive id.
+        member_ss58: The member to remove.
+        owner: Set for self-leave and for a manager.
+    """
+    return Op(build.remove_drive_member(folder_hash, member_ss58, owner), _ignored)
+
+
+def change_member_role(
+    folder_hash: str, member_ss58: str, role: str, owner: str | None
+) -> Op[models.DriveMember]:
+    """Change a member's role in place.
+
+    Args:
+        folder_hash: The drive id.
+        member_ss58: The member to change.
+        role: ``reader``, ``writer``, or ``manager``.
+        owner: Set when a manager changes a role on someone else's drive.
+    """
+    request = build.change_member_role(folder_hash, member_ss58, role, owner)
+    return Op(request, _parser(models.DriveMember))
+
+
+def invite_meta(token: str) -> Op[models.InviteMeta]:
+    """Read an invite preview without sending the bearer token.
+
+    Args:
+        token: The plaintext invite token.
+    """
+    return Op(build.invite_meta(token), _parser(models.InviteMeta))
+
+
+def accept_invite(token: str, grant_blob: str) -> Op[models.AcceptResult]:
+    """Join a drive.
+
+    Args:
+        token: The plaintext invite token.
+        grant_blob: Standard padded base64 of the sealed folder phrase.
+    """
+    return Op(build.accept_invite(token, grant_blob), _parser(models.AcceptResult))
+
+
+def list_memberships() -> Op[models.DriveMembershipsWire]:
+    """List drives the caller has joined, grants still sealed."""
+    return Op(build.list_memberships(), _parser(models.DriveMembershipsWire))

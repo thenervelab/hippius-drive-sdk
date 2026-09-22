@@ -1,16 +1,21 @@
 import ast
+import base64
 import json
 from pathlib import Path
 
+import blake3
 import httpx
 import pytest
 import respx
 from click.testing import CliRunner, Result
 
 from hippius_drive import __version__, cli
+from hippius_drive._transport import Transport
 from hippius_drive.cli import main
-from hippius_drive.crypto import file_cipher, hashes, kdf, mnemonic_store
+from hippius_drive.client import Client
+from hippius_drive.crypto import file_cipher, grant, hashes, kdf, mnemonic_store, sharing
 from hippius_drive.identity import Identity
+from tests.helpers import multipart_parts
 
 BASE = "https://example.test"
 MASTER = " ".join(["abandon"] * 23 + ["art"])
@@ -153,6 +158,13 @@ def test_a_wrong_password_is_a_clean_message(env: dict[str, str]) -> None:
     result = run(["whoami"], env)
     assert result.exit_code != 0
     assert "wrong password" in result.output.lower()
+
+
+def test_invite_put_without_a_mnemonic_points_at_init(env: dict[str, str], tmp_path: Path) -> None:
+    env["HIPPIUS_MNEMONIC_FILE"] = str(tmp_path / "nope.json")
+    result = run(["invite", "put"], env)
+    assert result.exit_code != 0
+    assert "hippius-drive init" in result.output
 
 
 def test_a_missing_mnemonic_file_points_at_init(env: dict[str, str], tmp_path: Path) -> None:
@@ -632,3 +644,354 @@ def test_mv_finds_the_right_file_among_several(env: dict[str, str]) -> None:
     assert run(["mv", "a.bin", "b.bin"], env).exit_code == 0
     entry = json.loads(rename.calls.last.request.content)["renames"][0]
     assert bytes(entry["old_path_hash"]) == hashes.path_hash("a.bin")
+
+
+CONSOLE = "https://console.hippius.com"
+OWNER = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+
+
+def _report(tmp_path: Path, payload: bytes = b"hello") -> Path:
+    path = tmp_path / "report.txt"
+    path.write_bytes(payload)
+    return path
+
+
+@respx.mock
+def test_share_put_prints_a_url_the_library_can_open(env: dict[str, str], tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        parts = multipart_parts(request)
+        captured["meta"] = json.loads(parts[0][2])
+        captured["blob"] = parts[1][2]
+        return httpx.Response(201, json={"share_token": "tok", "expires_at": None})
+
+    respx.post(f"{BASE}/v1/shares").mock(side_effect=capture)
+    local = _report(tmp_path)
+    result = run(["share", "put", str(local), "--name", "report.txt", "--ttl", "7d"], env)
+    assert result.exit_code == 0, result.output
+    url = result.output.strip()
+    assert url.startswith(f"{CONSOLE}/share/tok#k=")
+    assert "example.test" not in url
+    assert MASTER not in result.output
+
+    meta = captured["meta"]
+    blob = captured["blob"]
+    assert isinstance(meta, dict)
+    assert isinstance(blob, bytes)
+    assert meta["filename"] == "report.txt"
+    assert meta["ttl"] == "7d"
+    assert meta["plaintext_size"] == len(b"hello")
+    respx.get(f"{BASE}/v1/shares/tok/meta").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "filename_ct": meta["filename_ct"],
+                "filename_nonce": meta["filename_nonce"],
+                "mime_type": meta["mime_type"],
+                "plaintext_size": 5,
+                "ciphertext_size": len(blob),
+            },
+        )
+    )
+    respx.get(f"{BASE}/v1/shares/tok/blob").mock(return_value=httpx.Response(200, content=blob))
+    identity = Identity.from_master(MASTER, "default", account_ss58=SS58)
+    with Client(token="tok", identity=identity, transport=Transport(BASE, "tok")) as client:
+        opened = client.shares.open(url)
+    assert opened.data == b"hello"
+    assert opened.filename == "report.txt"
+
+
+@respx.mock
+def test_share_put_password_hides_the_key(env: dict[str, str], tmp_path: Path) -> None:
+    respx.post(f"{BASE}/v1/shares").mock(
+        return_value=httpx.Response(201, json={"share_token": "pw", "expires_at": None})
+    )
+    result = run(
+        ["share", "put", str(_report(tmp_path, b"x")), "--name", "a.txt", "--password", "hunter22"],
+        env,
+    )
+    assert result.exit_code == 0, result.output
+    url = result.output.strip()
+    assert url.startswith(f"{CONSOLE}/share/pw#p=")
+    assert "#k=" not in url
+    assert sharing.parse_share_url(url).secret.private
+
+
+def test_share_put_rejects_a_short_password(env: dict[str, str], tmp_path: Path) -> None:
+    result = run(
+        ["share", "put", str(_report(tmp_path, b"x")), "--name", "a.txt", "--password", "short"],
+        env,
+    )
+    assert result.exit_code != 0
+    assert "8" in result.output
+
+
+def test_share_put_rejects_a_name_with_a_slash(env: dict[str, str], tmp_path: Path) -> None:
+    result = run(["share", "put", str(_report(tmp_path, b"x")), "--name", "a/b.txt"], env)
+    assert result.exit_code != 0
+    assert "filename" in result.output
+
+
+@respx.mock
+def test_share_ls_omits_the_owner_wrap_and_rm_revokes(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/v1/shares").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "share_token": "abc",
+                    "filename": "a.txt",
+                    "plaintext_size": 4,
+                    "expires_at": None,
+                    "owner_wrap": "sealed-secret",
+                }
+            ],
+        )
+    )
+    listed = run(["share", "ls"], env)
+    assert listed.exit_code == 0
+    assert "abc" in listed.output
+    assert "a.txt" in listed.output
+    assert "sealed-secret" not in listed.output
+    rows = json.loads(run(["share", "ls", "--json"], env).output)
+    assert rows[0]["share_token"] == "abc"
+    assert "owner_wrap" not in rows[0]
+
+    route = respx.delete(f"{BASE}/v1/shares/abc").mock(return_value=httpx.Response(204))
+    removed = run(["share", "rm", "abc"], env)
+    assert removed.exit_code == 0
+    assert removed.output.strip() == "revoked"
+    assert route.called
+
+
+@respx.mock
+def test_folder_share_put_prints_the_drive_file_key(env: dict[str, str]) -> None:
+    respx.post(f"{BASE}/v1/folder-shares").mock(
+        return_value=httpx.Response(201, json={"share_token": "fold", "expires_at": "later"})
+    )
+    result = run(
+        [
+            "folder-share",
+            "put",
+            "--prefix",
+            "work",
+            "--name",
+            "Work",
+            "--console",
+            "https://console.example",
+        ],
+        env,
+    )
+    assert result.exit_code == 0, result.output
+    url = result.output.strip()
+    assert url.startswith("https://console.example/share/folder/fold#k=")
+    parsed = sharing.parse_share_url(url)
+    assert parsed.folder
+    assert parsed.secret.material == key()
+    body = json.loads(respx.calls.last.request.content)
+    assert body["path_prefix"] == "work"
+    assert body["display_name"] == "Work"
+    assert body["ttl"] == "24h"
+    assert "owner_ss58" not in body
+
+
+@respx.mock
+def test_folder_share_ls_prints_the_hash_and_rm_revokes(env: dict[str, str]) -> None:
+    digest = "ab" * 32
+    respx.get(f"{BASE}/v1/folder-shares").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "token_hash": digest,
+                    "path_prefix": "",
+                    "display_name": "Whole",
+                    "expires_at": None,
+                }
+            ],
+        )
+    )
+    listed = run(["folder-share", "ls"], env)
+    assert digest in listed.output
+    assert "Whole" in listed.output
+    route = respx.delete(f"{BASE}/v1/folder-shares/fold").mock(return_value=httpx.Response(204))
+    removed = run(["folder-share", "rm", "fold"], env)
+    assert removed.exit_code == 0
+    assert route.called
+
+
+@respx.mock
+def test_invite_put_prints_the_entropy_url_and_not_the_phrase(env: dict[str, str]) -> None:
+    token = "inviteTok"
+    invite_id = blake3.blake3(token.encode()).hexdigest()
+    respx.post(f"{BASE}/v1/drive-invites").mock(
+        return_value=httpx.Response(200, json={"invite_token": token, "invite_id": invite_id})
+    )
+    seal = respx.put(url__regex=r".*/sealed-token$").mock(return_value=httpx.Response(204))
+    result = run(["invite", "put", "--role", "reader", "--days", "2"], env)
+    assert result.exit_code == 0, result.output
+    phrase = kdf.derive_folder_mnemonic(MASTER, "default")
+    assert phrase not in result.output
+    assert MASTER not in result.output
+    got_token, entropy = grant.parse_invite_url(result.output.strip())
+    assert got_token == token
+    assert entropy == kdf.folder_entropy(MASTER, "default")
+    body = json.loads(respx.calls[0].request.content)
+    assert body == {"folder_hash": FOLDER, "role": "reader", "expires_in_secs": 2 * 86400}
+    assert seal.called
+
+
+@respx.mock
+def test_invite_put_unlocks_once_and_omits_the_lifetime(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = "inviteTok"
+    invite_id = blake3.blake3(token.encode()).hexdigest()
+    respx.post(f"{BASE}/v1/drive-invites").mock(
+        return_value=httpx.Response(200, json={"invite_token": token, "invite_id": invite_id})
+    )
+    respx.put(url__regex=r".*/sealed-token$").mock(return_value=httpx.Response(204))
+    loads: list[int] = []
+    real = mnemonic_store.load
+
+    def counting(path: Path, password: str) -> str:
+        loads.append(1)
+        return real(path, password)
+
+    monkeypatch.setattr("hippius_drive.cli.mnemonic_store.load", counting)
+    assert run(["invite", "put"], env).exit_code == 0
+    assert loads == [1]
+    assert json.loads(respx.calls[0].request.content) == {"folder_hash": FOLDER, "role": "writer"}
+
+
+@respx.mock
+def test_drives_lists_memberships_without_the_phrase(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/v1/drive-memberships").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "memberships": [
+                    {
+                        "owner_ss58": OWNER,
+                        "folder_hash": FOLDER,
+                        "role": "writer",
+                        "grant_blob": "",
+                        "display_label": "Docs",
+                        "frozen": True,
+                    }
+                ]
+            },
+        )
+    )
+    output = run(["drives"], env).output
+    assert "Docs" in output
+    assert "frozen" in output
+    assert "writer" in output
+    assert MASTER not in output
+    rows = json.loads(run(["drives", "--json"], env).output)
+    assert rows[0]["display_label"] == "Docs"
+    assert rows[0]["frozen"] is True
+    assert "folder_mnemonic" not in rows[0]
+
+
+@respx.mock
+def test_drives_leave_reports_a_missing_membership(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/v1/drive-memberships").mock(
+        return_value=httpx.Response(200, json={"memberships": []})
+    )
+    result = run(["drives", "leave", OWNER, FOLDER], env)
+    assert result.exit_code != 0
+    assert "no membership" in result.output
+
+
+@respx.mock
+def test_drives_leave_reports_a_missing_grant(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/v1/drive-memberships").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "memberships": [
+                    {
+                        "owner_ss58": SS58,
+                        "folder_hash": "ab" * 8,
+                        "role": "reader",
+                        "grant_blob": "",
+                        "display_label": "Other",
+                    },
+                    {
+                        "owner_ss58": OWNER,
+                        "folder_hash": FOLDER,
+                        "role": "reader",
+                        "grant_blob": "",
+                        "display_label": "Docs",
+                    },
+                ]
+            },
+        )
+    )
+    result = run(["drives", "leave", OWNER, FOLDER], env)
+    assert result.exit_code != 0
+    assert "no grant" in result.output
+
+
+@pytest.fixture(scope="module")
+def sealed_grant() -> str:
+    # Production Argon2id (128 MiB). One seal, reused by the leave command test.
+    phrase = kdf.derive_folder_mnemonic(MASTER, "default")
+    return base64.b64encode(grant.seal_grant(MASTER, SS58, phrase)).decode()
+
+
+@respx.mock
+def test_invite_accept_prints_the_drive_and_not_the_phrase(env: dict[str, str]) -> None:
+    # Seals a grant under the production Argon2id parameters.
+    phrase = kdf.derive_folder_mnemonic(MASTER, "default")
+    entropy = kdf.folder_entropy(MASTER, "default")
+    url = grant.invite_url(CONSOLE, "joinme", entropy)
+    respx.post(f"{BASE}/v1/drive-invites/joinme/accept").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "owner_ss58": OWNER,
+                "folder_hash": FOLDER,
+                "role": "writer",
+                "already_owner": False,
+            },
+        )
+    )
+    result = run(["invite", "accept", url], env)
+    assert result.exit_code == 0, result.output
+    assert f"owner        {OWNER}" in result.output
+    assert f"folder_hash  {FOLDER}" in result.output
+    assert "role         writer" in result.output
+    assert phrase not in result.output
+    assert MASTER not in result.output
+
+
+@respx.mock
+def test_drives_leave_uses_the_opened_grant(env: dict[str, str], sealed_grant: str) -> None:
+    respx.get(f"{BASE}/v1/drive-memberships").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "memberships": [
+                    {
+                        "owner_ss58": OWNER,
+                        "folder_hash": FOLDER,
+                        "role": "writer",
+                        "grant_blob": sealed_grant,
+                        "display_label": "Docs",
+                    }
+                ]
+            },
+        )
+    )
+    route = respx.delete(f"{BASE}/v1/drives/{FOLDER}/members/{SS58}").mock(
+        return_value=httpx.Response(204)
+    )
+    result = run(["drives", "leave", OWNER, FOLDER], env)
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "left"
+    assert route.calls.last.request.url.params["owner"] == OWNER
+    phrase = kdf.derive_folder_mnemonic(MASTER, "default")
+    assert phrase not in result.output

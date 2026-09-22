@@ -14,6 +14,7 @@ from hippius_drive._transport import (
     Transport,
     _attempts_for,
     _http_timeout,
+    _transport_error,
     pick_region,
     pick_region_async,
     prepare,
@@ -94,6 +95,15 @@ def test_only_the_async_transport_leaves_writes_uncapped() -> None:
     assert a._client.timeout == httpx.Timeout(7.0, write=None)
     assert explicit._client.timeout == httpx.Timeout(3.0, write=5.0)
     t.close()
+
+
+def test_a_redacted_transport_error_omits_the_url() -> None:
+    exc = httpx.ConnectError("failed for url (https://x/v1/shares/SECRET/blob)")
+    hidden = _transport_error(exc, redact_url=True)
+    shown = _transport_error(exc, redact_url=False)
+    assert "SECRET" not in hidden.message
+    assert hidden.message == "ConnectError"
+    assert "SECRET" in shown.message
 
 
 @respx.mock

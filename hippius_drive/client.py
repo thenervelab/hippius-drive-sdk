@@ -2,7 +2,8 @@
 
 Every operation is defined once in :mod:`hippius_drive._ops`; the two clients
 differ only in whether they await the transport. Namespaces (``folders``,
-``files``, ``summary``) group the endpoints the way a caller thinks about them.
+``files``, ``summary``, ``shares``, ``folder_shares``, ``drives``) group the
+endpoints the way a caller thinks about them.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from typing import IO, Any, TypeVar
 import httpx
 from pydantic import ValidationError
 
-from hippius_drive import _ops, _session, _upload, errors, models
+from hippius_drive import _namespaces, _ops, _session, _upload, errors, models
 from hippius_drive._ops import Op
 from hippius_drive._transport import (
     DEFAULT_TIMEOUT,
@@ -543,6 +544,9 @@ class Client:
         folders: Folder registry operations.
         files: File listing, search, transfer, and lifecycle.
         summary: Account-level storage summaries.
+        shares: File-share links.
+        folder_shares: Folder-share links.
+        drives: Shared-drive invites and membership.
     """
 
     def __init__(
@@ -557,8 +561,10 @@ class Client:
         """Build the client.
 
         Args:
-            token: The bearer token the Hippius auth service issued. It must
-                resolve to ``identity.account_ss58``.
+            token: The bearer token the Hippius auth service issued. For a
+                folder this account owns it resolves to ``identity.account_ss58``.
+                For a shared drive it resolves to the member, and
+                ``account_ss58`` is the drive owner.
             identity: The account address and folder keys.
             server_url: A specific server; otherwise the first healthy region
                 in ``REGIONS`` order is probed once, here, rather than on
@@ -578,6 +584,9 @@ class Client:
         self.folders = FolderOps(self)
         self.files = FileOps(self)
         self.summary = SummaryOps(self)
+        self.shares = _namespaces.ShareOps(self)
+        self.folder_shares = _namespaces.FolderShareOps(self)
+        self.drives = _namespaces.DriveOps(self)
 
     @property
     def transport(self) -> Transport:
@@ -954,6 +963,9 @@ class AsyncClient:
         folders: Folder registry operations.
         files: File listing, search, transfer, and lifecycle.
         summary: Account-level storage summaries.
+        shares: File-share links.
+        folder_shares: Folder-share links.
+        drives: Shared-drive invites and membership.
     """
 
     def __init__(
@@ -973,7 +985,10 @@ class AsyncClient:
         :mod:`hippius_drive._transport` (it returns a URL, not a transport).
 
         Args:
-            token: The bearer token the Hippius auth service issued.
+            token: The bearer token the Hippius auth service issued. For a
+                folder this account owns it resolves to ``identity.account_ss58``.
+                For a shared drive it resolves to the member, and
+                ``account_ss58`` is the drive owner.
             identity: The account address and folder keys.
             server_url: The server to talk to; the first region by default.
             timeout: Connect/read/pool budget in seconds, or a full
@@ -988,6 +1003,9 @@ class AsyncClient:
         self.folders = AsyncFolderOps(self)
         self.files = AsyncFileOps(self)
         self.summary = AsyncSummaryOps(self)
+        self.shares = _namespaces.AsyncShareOps(self)
+        self.folder_shares = _namespaces.AsyncFolderShareOps(self)
+        self.drives = _namespaces.AsyncDriveOps(self)
 
     @property
     def transport(self) -> AsyncTransport:

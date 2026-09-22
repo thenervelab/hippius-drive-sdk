@@ -94,7 +94,9 @@ def prepare(request: Request, token: str) -> dict[str, Any]:
     Returns:
         Keyword arguments for ``httpx.Client.request``.
     """
-    headers = {"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT}
+    headers = {"User-Agent": USER_AGENT}
+    if request.authenticated:
+        headers["Authorization"] = f"Bearer {token}"
     if request.headers:
         headers.update(request.headers)
 
@@ -158,7 +160,10 @@ def _attempts_for(request: Request) -> int:
     return MAX_ATTEMPTS if replayable else 1
 
 
-def _transport_error(exc: Exception) -> errors.TransportError:
+def _transport_error(exc: Exception, *, redact_url: bool = False) -> errors.TransportError:
+    """Build a transport error. A redacted one keeps the URL, and any token in it, out."""
+    if redact_url:
+        return errors.TransportError(type(exc).__name__)
     return errors.TransportError(f"{type(exc).__name__}: {exc}")
 
 
@@ -221,7 +226,7 @@ class Transport:
             except httpx.HTTPError as exc:
                 # A write error, protocol error or pool timeout may have landed
                 # a partial request, so it is not replayed.
-                raise _transport_error(exc) from exc
+                raise _transport_error(exc, redact_url=request.redact_url) from exc
             else:
                 if attempt == attempts or response.status_code not in _RETRYABLE_STATUSES:
                     return response
@@ -229,7 +234,7 @@ class Transport:
             if attempt < attempts:
                 self._sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
         assert last is not None  # noqa: S101 - the loop returns on any response
-        raise _transport_error(last)
+        raise _transport_error(last, redact_url=request.redact_url)
 
     def call(self, request: Request) -> Any:
         """Send ``request`` and unwrap the envelope.
@@ -268,13 +273,13 @@ class Transport:
         except httpx.HTTPError as exc:
             with suppress(errors.TransportError):
                 _exit_sync_stream(cm, *sys.exc_info())
-            raise _transport_error(exc) from exc
+            raise _transport_error(exc, redact_url=request.redact_url) from exc
         except BaseException:
             with suppress(httpx.HTTPError):
                 cm.__exit__(*sys.exc_info())
             raise
         else:
-            _exit_sync_stream(cm)
+            _exit_sync_stream(cm, redact_url=request.redact_url)
 
     def close(self) -> None:
         """Close the underlying connection pool."""
@@ -337,7 +342,7 @@ class AsyncTransport:
             except _RETRYABLE_EXCEPTIONS as exc:
                 last = exc
             except httpx.HTTPError as exc:
-                raise _transport_error(exc) from exc
+                raise _transport_error(exc, redact_url=request.redact_url) from exc
             else:
                 if attempt == attempts or response.status_code not in _RETRYABLE_STATUSES:
                     return response
@@ -345,7 +350,7 @@ class AsyncTransport:
             if attempt < attempts:
                 await self._sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
         assert last is not None  # noqa: S101 - the loop returns on any response
-        raise _transport_error(last)
+        raise _transport_error(last, redact_url=request.redact_url)
 
     async def call(self, request: Request) -> Any:
         """Send ``request`` and unwrap the envelope.
@@ -384,13 +389,13 @@ class AsyncTransport:
         except httpx.HTTPError as exc:
             with suppress(errors.TransportError):
                 await _exit_async_stream(cm, *sys.exc_info())
-            raise _transport_error(exc) from exc
+            raise _transport_error(exc, redact_url=request.redact_url) from exc
         except BaseException:
             with suppress(httpx.HTTPError):
                 await cm.__aexit__(*sys.exc_info())
             raise
         else:
-            await _exit_async_stream(cm)
+            await _exit_async_stream(cm, redact_url=request.redact_url)
 
     async def aclose(self) -> None:
         """Close the underlying connection pool."""
@@ -401,24 +406,24 @@ def _keep_stream(attempt: int, attempts: int, status: int) -> bool:
     return attempt == attempts or status not in _RETRYABLE_STATUSES
 
 
-def _exit_sync_stream(cm: Any, *exc_info: Any) -> None:
+def _exit_sync_stream(cm: Any, *exc_info: Any, redact_url: bool = False) -> None:
     """Close a sync httpx stream; map close-time HTTPError to TransportError."""
     if not exc_info:
         exc_info = (None, None, None)
     try:
         cm.__exit__(*exc_info)
     except httpx.HTTPError as exc:
-        raise _transport_error(exc) from exc
+        raise _transport_error(exc, redact_url=redact_url) from exc
 
 
-async def _exit_async_stream(cm: Any, *exc_info: Any) -> None:
+async def _exit_async_stream(cm: Any, *exc_info: Any, redact_url: bool = False) -> None:
     """Async twin of :func:`_exit_sync_stream`."""
     if not exc_info:
         exc_info = (None, None, None)
     try:
         await cm.__aexit__(*exc_info)
     except httpx.HTTPError as exc:
-        raise _transport_error(exc) from exc
+        raise _transport_error(exc, redact_url=redact_url) from exc
 
 
 def _discard_sync_stream(cm: Any) -> Exception | None:
@@ -455,7 +460,7 @@ def _acquire_sync_stream(
         except _RETRYABLE_EXCEPTIONS as exc:
             last = exc
         except httpx.HTTPError as exc:
-            raise _transport_error(exc) from exc
+            raise _transport_error(exc, redact_url=request.redact_url) from exc
         else:
             if _keep_stream(attempt, attempts, response.status_code):
                 return cm, response
@@ -465,7 +470,7 @@ def _acquire_sync_stream(
         if attempt < attempts:
             sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
     assert last is not None  # noqa: S101 - a kept stream returns
-    raise _transport_error(last)
+    raise _transport_error(last, redact_url=request.redact_url)
 
 
 async def _acquire_async_stream(
@@ -484,7 +489,7 @@ async def _acquire_async_stream(
         except _RETRYABLE_EXCEPTIONS as exc:
             last = exc
         except httpx.HTTPError as exc:
-            raise _transport_error(exc) from exc
+            raise _transport_error(exc, redact_url=request.redact_url) from exc
         else:
             if _keep_stream(attempt, attempts, response.status_code):
                 return cm, response
@@ -494,7 +499,7 @@ async def _acquire_async_stream(
         if attempt < attempts:
             await sleep(_jittered(_BACKOFF_SECONDS[attempt - 1]))
     assert last is not None  # noqa: S101 - a kept stream returns
-    raise _transport_error(last)
+    raise _transport_error(last, redact_url=request.redact_url)
 
 
 def _probe(client: httpx.Client, base_url: str, timeout: float) -> bool:

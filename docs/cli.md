@@ -112,6 +112,50 @@ hippius-drive quota --size 10485760         # would this many bytes fit?
 Search spans every folder on the account, not just the configured one, and each
 hit names the folder it came from.
 
+## Shares
+
+```bash
+hippius-drive share put report.pdf --name report.pdf
+hippius-drive share put report.pdf --name report.pdf --ttl 7d --password 'at-least-8'
+hippius-drive share ls
+hippius-drive share ls --json
+hippius-drive share rm TOKEN
+
+hippius-drive folder-share put --prefix work --name Work
+hippius-drive folder-share put --name "Whole drive"          # empty prefix
+hippius-drive folder-share ls
+hippius-drive folder-share rm TOKEN                          # token or 64-hex token_hash
+```
+
+`share put` and `folder-share put` print one console URL. That URL is the
+decryption key. `--console` changes the origin; it defaults to
+`https://console.hippius.com` and is separate from `--server`. A `--password`
+of at least 8 characters produces a `#p=` link.
+
+File-share `ls` prints the plaintext token. Folder-share `ls` prints
+`token_hash`, because the listing does not contain the token.
+
+## Shared drives
+
+```bash
+hippius-drive invite put                         # writer, server-default lifetime
+hippius-drive invite put --role reader --days 7
+hippius-drive invite accept 'https://console.hippius.com/invite/TOKEN#k=...'
+
+hippius-drive drives
+hippius-drive drives --json
+hippius-drive drives leave OWNER_SS58 FOLDER_HASH
+```
+
+`invite put` prints the invite URL and performs the seal-back itself. It does
+not print the folder phrase. `invite accept` uses this configuration's mnemonic
+file and `--account`, and prints the owner, folder hash, and role.
+
+`drives` lists memberships opened from this account's grants: owner, folder
+hash, role, and label. `drives leave` looks that row up and leaves as the
+configured account. Changing a member's role, and uploading owner-wraps, are
+library calls.
+
 ## Errors
 
 Failures print one line and exit 1 — no traceback. That includes a batch `rm`

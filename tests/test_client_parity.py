@@ -17,19 +17,20 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import blake3
 import httpx
 import pytest
 import respx
 from nacl.signing import VerifyKey
 
-from hippius_drive import errors
+from hippius_drive import FileShareSpec, InviteSpec, errors
 from hippius_drive._transport import AsyncTransport, Transport
 from hippius_drive._upload import TRANSPORT_CHUNK
 from hippius_drive.client import AsyncClient, Client
-from hippius_drive.crypto import file_cipher
+from hippius_drive.crypto import file_cipher, kdf
 from hippius_drive.identity import Identity, tos_text
 from hippius_drive.models import BrowseOptions, RenameSpec, SearchFilters
-from tests.helpers import manifest_from
+from tests.helpers import manifest_from, multipart_parts
 
 BASE = "https://example.test"
 MASTER = " ".join(["abandon"] * 23 + ["art"])
@@ -321,3 +322,66 @@ async def test_both_clients_raise_the_same_typed_error(identity: Identity) -> No
 
     assert str(async_exc.value) == str(sync_exc.value)
     assert async_exc.value.code == sync_exc.value.code == "forbidden"
+
+
+def _share_metadata(request: httpx.Request) -> dict[str, Any]:
+    payload = multipart_parts(request)[0][2]
+    parsed = json.loads(payload)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_file_share_metadata_agrees_across_clients(identity: Identity) -> None:
+    route = respx.post(f"{BASE}/v1/shares").mock(
+        return_value=httpx.Response(201, json={"share_token": "s", "expires_at": None})
+    )
+    spec = FileShareSpec("a.txt", mime_type="text/plain", ttl="7d")
+
+    with Client(token="tok", identity=identity, transport=Transport(BASE, "tok")) as client:
+        sync_created = client.shares.create(b"hello", spec)
+    sync_meta = _share_metadata(route.calls[0].request)
+
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as aclient:
+        async_created = await aclient.shares.create(b"hello", spec)
+    async_meta = _share_metadata(route.calls[1].request)
+
+    for field in ("filename", "plaintext_size", "ciphertext_size", "mime_type", "ttl"):
+        assert sync_meta[field] == async_meta[field], field
+    assert sync_meta["plaintext_size"] == 5
+    assert sync_meta["ttl"] == "7d"
+    prefix = "https://console.hippius.com/share/s#k="
+    assert sync_created.share_url.startswith(prefix)
+    assert async_created.share_url.startswith(prefix)
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_invite_mint_agrees_across_clients(identity: Identity) -> None:
+    token = "inviteTok"
+    invite_id = blake3.blake3(token.encode()).hexdigest()
+    respx.post(f"{BASE}/v1/drive-invites").mock(
+        return_value=httpx.Response(200, json={"invite_token": token, "invite_id": invite_id})
+    )
+    sealed = respx.put(url__regex=r".*/sealed-token$").mock(return_value=httpx.Response(204))
+    spec = InviteSpec(kdf.derive_folder_mnemonic(MASTER, "default"), role="manager", max_uses=3)
+
+    with Client(token="tok", identity=identity, transport=Transport(BASE, "tok")) as client:
+        sync_created = client.drives.create_invite(spec)
+    sync_post = respx.calls[0].request.content
+
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as aclient:
+        async_created = await aclient.drives.create_invite(spec)
+    async_post = respx.calls[2].request.content
+
+    assert sync_post == async_post
+    assert json.loads(sync_post) == {"folder_hash": FOLDER, "role": "manager", "max_uses": 3}
+    prefix = f"https://console.hippius.com/invite/{token}#k="
+    assert sync_created.invite_url.startswith(prefix)
+    assert async_created.invite_url == sync_created.invite_url
+    assert sealed.call_count == 2

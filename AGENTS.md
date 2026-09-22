@@ -78,6 +78,16 @@ not in `__all__` — the CLI and the quickstart both import it.
 | Delete many (≤1000) | `client.files.delete_many(ids)` — inspect `errors` |
 | Quota preflight | `client.can_upload(n)` — advisory; a refusal can still succeed on write |
 | Account totals | `client.summary.user()` — can lag a just-finished upload by ~1s |
+| Mint a file-share link | `client.shares.create(path_or_bytes, FileShareSpec(filename))` — URL fragment is a fresh key |
+| Open a file share | `client.shares.open(share_url)` — anonymous; password links need `password=` |
+| List / revoke file shares | `client.shares.list()` / `client.shares.revoke(token)` |
+| Mint a folder-share link | `client.folder_shares.create(FolderShareSpec(prefix, name))` — fragment is the drive file key |
+| Revoke a folder share | `client.folder_shares.revoke(token_or_hash)` — list returns `token_hash` only |
+| Invite someone to this drive | `client.drives.create_invite(InviteSpec(folder_mnemonic, role="writer"))` |
+| Join a drive | `client.drives.accept(url, member_master, member_ss58=account)` |
+| List joined drives | `client.drives.memberships(member_master, member_ss58=account)` |
+| Act as a member | `Identity.for_shared_drive(phrase, owner_ss58=..., folder_hash=..., role=...)` then `Client(token=member_token, identity=that)` |
+| Leave a drive | `member_client.drives.leave(member_account)` — always sends `?owner=` the drive owner |
 
 `put` picks the wire path by ciphertext size: a blob that fits one 8 MiB
 transport chunk is a single request; anything larger is a resumable session.
@@ -139,7 +149,8 @@ is `ValueError`, raised locally.
 | `Unauthorized` | 401 — token missing, malformed, or rejected |
 | `Forbidden` | 403 — token resolves to a different account than the request names |
 | `QuotaExceeded` | 402 — over plan/credits; may carry `balance_cents` / `required_cents` |
-| `NotFound` | 404 — no such file, folder, or session |
+| `NotFound` | 404 — no such file, folder, share, or session. An empty 404 is still `NotFound` |
+| `Gone` | 410 — invite revoked, expired, or exhausted |
 | `Conflict` | 409 — stale `base_revision_id` |
 | `PayloadTooLarge` | 413 — a multipart field exceeded its cap |
 | `RateLimited` | 429 — back off; may carry `retry_after` |
@@ -182,28 +193,46 @@ hippius-drive ls work
 hippius-drive ls --all                      # includes rows with no plaintext path
 hippius-drive mv work/a.pdf archive/a.pdf   # looks up the revision for you
 hippius-drive rm work/a.pdf
+hippius-drive share put report.pdf --name report.pdf
+hippius-drive folder-share put --prefix work --name Work
+hippius-drive invite put --role writer --days 7
+hippius-drive invite accept URL
+hippius-drive drives
+hippius-drive drives leave OWNER_SS58 FOLDER_HASH
 ```
 
-Replacing via CLI still needs `--base-revision` and `--revision-seq`. Failures
-print one line and exit 1 — no traceback. Full flag list: [docs/cli.md](docs/cli.md).
+Replacing via CLI still needs `--base-revision` and `--revision-seq`. Share and
+invite commands print the URL once; that URL is the key. Failures print one
+line and exit 1 — no traceback. Full flag list: [docs/cli.md](docs/cli.md).
+
+A member client's `account_ss58` is the drive **owner**. The bearer token is
+the member's. Do not recompute `folder_hash` from a label the member chose;
+use the hash from the invite or the membership row.
 
 ### Not in v1 — do not invent these
 
-The sync engine, file/folder shares, shared drives, recovery bindings,
-mnemonic-blob **server** endpoints, admin endpoints, and S3-gateway variants
-are out of scope. The `crypto/` module does implement both local mnemonic-at-rest
-formats (`enc_mnemonic.json` and the console Argon2id sealed blob).
+The sync engine, recovery bindings, mnemonic-blob **server** endpoints, admin
+endpoints, and S3-gateway variants are out of scope. The `crypto/` module does
+implement both local mnemonic-at-rest formats (`enc_mnemonic.json` and the
+console Argon2id sealed blob), plus the share-link, owner-wrap, and grant
+formats the console and desktop client already use.
 
 ### Security rules for agents
 
-- Never log, commit, or echo a recovery phrase, folder mnemonic, or unlock
-  password. `init --mnemonic` does not print the phrase; keep that property.
-- The phrase is the only way to decrypt. Losing it loses the data. It cannot
-  be rotated without orphaning everything already stored.
+- Never log, commit, or echo a recovery phrase, folder mnemonic, unlock
+  password, share URL, invite URL, or grant blob. `init --mnemonic` does not
+  print the phrase; keep that property. `share put` and `invite put` print the
+  URL because that is the key the recipient needs.
+- The phrase is the only way to decrypt an owned folder. Losing it loses the
+  data, including files members uploaded into a shared drive. It cannot be
+  rotated without orphaning everything already stored.
+- A folder-share `#k=` is the drive file key. A shared-drive invite gives the
+  member that same file key. It does not give them the owner's master phrase.
 - File **contents** are encrypted on the machine (XChaCha20-Poly1305 frames).
   Paths, names, sizes, and timestamps are visible to the server. Use opaque
   names for anything sensitive. Full model: [docs/security.md](docs/security.md).
-- Do not "helpfully" derive `account_ss58` from the phrase.
+- Do not "helpfully" derive `account_ss58` from the phrase. On a member client
+  the wire address is the owner's, passed in explicitly.
 
 ---
 
@@ -237,11 +266,13 @@ secrets are present. Fork PRs skip e2e. The required check is the `ci` job.
 | Path | Role |
 |---|---|
 | `hippius_drive/__init__.py` | Public re-exports (`__all__` is the API) |
-| `client.py` | `Client` / `AsyncClient` and `folders` / `files` / `summary` |
-| `identity.py` | Account + per-folder keys; ToS / rename signing text |
+| `client.py` | `Client` / `AsyncClient`: `folders`, `files`, `summary`, `shares`, `folder_shares`, `drives` |
+| `identity.py` | Account + per-folder keys; member role; ToS / rename signing text |
 | `models.py` | Pydantic wire types; byte fields as JSON int arrays |
-| `errors.py` | `DriveError` tree |
-| `crypto/` | Hashes, KDF, framed cipher, both mnemonic-at-rest formats |
+| `errors.py` | `DriveError` tree, including `Gone` |
+| `crypto/` | Hashes, KDF, framed cipher, mnemonic-at-rest, share links, owner wrap, grants |
+| `_links.py` | Share and invite specs, URL finish, grant open. Re-exported specs are public |
+| `_namespaces.py` | Sync and async namespace objects. Not subclasses of each other |
 | `_ops.py` | One `Op` (request + parser) per endpoint |
 | `_wire.py` | Sans-I/O requests and envelope parsing |
 | `_transport.py` | httpx adapters, region probe, retry policy |
@@ -304,8 +335,8 @@ different field names, fix the replay in the same PR that commits the file.
 
 ### What not to do
 
-- Do not add v1-excluded features (sync, shares, shared drives, recovery,
-  admin, S3-gateway) unless the task explicitly is that work.
+- Do not add v1-excluded features (sync, recovery, admin, S3-gateway) unless
+  the task explicitly is that work.
 - Do not SS58-encode a key and call it `account_ss58`.
 - Do not log phrases, tokens, or folder keys in tests beyond the already-public
   BIP-39 fixtures (`abandon`…`art` and friends).

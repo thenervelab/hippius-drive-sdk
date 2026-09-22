@@ -1,6 +1,7 @@
 import pytest
 from nacl.signing import VerifyKey
 
+from hippius_drive.crypto import kdf
 from hippius_drive.identity import Identity, rename_text, tos_text
 
 MASTER = " ".join(["abandon"] * 23 + ["art"])
@@ -74,3 +75,33 @@ def test_repr_does_not_leak_key_material() -> None:
 def test_empty_account_ss58_is_rejected() -> None:
     with pytest.raises(ValueError):
         Identity.from_master(MASTER, "default", account_ss58="")
+
+
+def test_for_shared_drive_uses_the_owners_hash_and_folder_key() -> None:
+    folder = kdf.derive_folder_mnemonic(MASTER, "default")
+    ident = Identity.for_shared_drive(
+        folder,
+        owner_ss58=SS58,
+        folder_hash="ab" * 8,
+        role="writer",
+        label="shown",
+    )
+    owned = Identity.from_folder_mnemonic(folder, "default", account_ss58=SS58)
+    assert ident.account_ss58 == SS58
+    assert ident.folder_hash == "ab" * 8
+    assert ident.folder_hash != kdf.folder_hash("shown")
+    assert ident.encryption_key == owned.encryption_key
+    assert ident.role == "writer"
+    assert ident.scoped_folder_hash() == "ab" * 8
+    assert owned.role == "owner"
+    assert owned.scoped_folder_hash() is None
+
+
+def test_shared_drive_rejects_a_bad_hash_or_the_owner_role() -> None:
+    folder = kdf.derive_folder_mnemonic(MASTER, "default")
+    with pytest.raises(ValueError):
+        Identity.for_shared_drive(folder, owner_ss58=SS58, folder_hash="AB" * 8, role="writer")
+    with pytest.raises(ValueError):
+        Identity.for_shared_drive(folder, owner_ss58=SS58, folder_hash="ab" * 8, role="owner")
+    with pytest.raises(ValueError):
+        Identity.for_shared_drive(folder, owner_ss58="", folder_hash="ab" * 8, role="reader")

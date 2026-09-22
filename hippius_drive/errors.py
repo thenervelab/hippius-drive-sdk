@@ -12,6 +12,7 @@ __all__ = [
     "DecryptError",
     "DriveError",
     "Forbidden",
+    "Gone",
     "InvalidRequest",
     "InvalidResponse",
     "NotFound",
@@ -147,6 +148,10 @@ class Forbidden(DriveError):
 
 class NotFound(DriveError):
     """404: no such file, folder, or session for this account."""
+
+
+class Gone(DriveError):
+    """410: an invite is revoked, expired, or exhausted."""
 
 
 class Conflict(DriveError):
