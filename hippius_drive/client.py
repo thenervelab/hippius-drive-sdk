@@ -32,7 +32,12 @@ from hippius_drive._upload import UploadSpec
 from hippius_drive._wire import parse_envelope
 from hippius_drive.crypto import file_cipher, hashes
 from hippius_drive.identity import Identity
-from hippius_drive.models import BrowseOptions, RenameSpec, SearchFilters
+from hippius_drive.models import (
+    MAX_LISTING_PAGE_SIZE,
+    BrowseOptions,
+    RenameSpec,
+    SearchFilters,
+)
 
 T = TypeVar("T")
 
@@ -303,13 +308,47 @@ class FileOps:
             path: Directory relative to the folder root; "" is the root.
             options: Sort and filter options; ``path`` here wins over theirs.
             offset: Starting index into the combined folders-then-files stream.
-            limit: Results per page.
+            limit: Results per page; the server defaults to 50 and caps it at
+                200. Use :meth:`iter_browse` to list a whole directory.
 
         Returns:
             The page.
         """
         opts = _browse_options(path, options)
         return self._client.run(_ops.browse(self._client.identity, opts, offset, limit))
+
+    def iter_browse(
+        self,
+        path: str = "",
+        options: BrowseOptions | None = None,
+        page_size: int = MAX_LISTING_PAGE_SIZE,
+    ) -> Iterator[models.BrowseFolderEntry | models.RemoteFileEntry]:
+        """Walk one directory level, paging until the server says stop.
+
+        Pages on ``has_more`` rather than ``total_count``: the total is
+        approximate. The offset advances by the entries a page returned, not
+        by ``page_size``, because the server coerces a larger request down to
+        its own cap and folders and files share one offset space.
+
+        Args:
+            path: Directory relative to the folder root; "" is the root.
+            options: Sort and filter options; ``path`` here wins over theirs.
+            page_size: Entries to request per round trip; the server caps it
+                at 200.
+
+        Yields:
+            Each subfolder, then each file, in the server's order.
+        """
+        offset = 0
+        while True:
+            page = self.browse(path, options, offset=offset, limit=page_size)
+            yield from page.folders
+            yield from page.files
+
+            returned = len(page.folders) + len(page.files)
+            if not page.has_more or not returned:
+                return
+            offset += returned
 
     def search(
         self, filters: SearchFilters | None = None, offset: int = 0, limit: int | None = None
@@ -318,8 +357,12 @@ class FileOps:
 
         Args:
             filters: The filter and sort set; every filter ANDs with the rest.
-            offset: Starting index into the result set.
-            limit: Results per page; the server defaults to 25.
+                A ``q`` shorter than 3 characters after trimming returns no
+                hits by server policy: an empty page, not an error.
+            offset: Starting index into the result set. For the next page,
+                add the number of hits returned, not ``limit``.
+            limit: Results per page; the server defaults to 25 and caps it
+                at 200.
 
         Returns:
             The page.
@@ -770,7 +813,8 @@ class AsyncFileOps:
             path: Directory relative to the folder root; "" is the root.
             options: Sort and filter options; ``path`` here wins over theirs.
             offset: Starting index into the combined stream.
-            limit: Results per page.
+            limit: Results per page; the server defaults to 50 and caps it at
+                200. Use :meth:`iter_browse` to list a whole directory.
 
         Returns:
             The page.
@@ -778,15 +822,47 @@ class AsyncFileOps:
         opts = _browse_options(path, options)
         return await self._client.run(_ops.browse(self._client.identity, opts, offset, limit))
 
+    async def iter_browse(
+        self,
+        path: str = "",
+        options: BrowseOptions | None = None,
+        page_size: int = MAX_LISTING_PAGE_SIZE,
+    ) -> AsyncIterator[models.BrowseFolderEntry | models.RemoteFileEntry]:
+        """Walk one directory level, paging until the server says stop.
+
+        Args:
+            path: Directory relative to the folder root; "" is the root.
+            options: Sort and filter options; ``path`` here wins over theirs.
+            page_size: Entries to request per round trip; the server caps it
+                at 200.
+
+        Yields:
+            Each subfolder, then each file, in the server's order.
+        """
+        offset = 0
+        while True:
+            page = await self.browse(path, options, offset=offset, limit=page_size)
+            for folder in page.folders:
+                yield folder
+            for entry in page.files:
+                yield entry
+
+            returned = len(page.folders) + len(page.files)
+            if not page.has_more or not returned:
+                return
+            offset += returned
+
     async def search(
         self, filters: SearchFilters | None = None, offset: int = 0, limit: int | None = None
     ) -> models.SearchResult:
         """Search across every folder the account owns.
 
         Args:
-            filters: The filter and sort set.
+            filters: The filter and sort set. A ``q`` shorter than 3
+                characters after trimming returns no hits by server policy.
             offset: Starting index into the result set.
-            limit: Results per page.
+            limit: Results per page; the server defaults to 25 and caps it
+                at 200.
 
         Returns:
             The page.

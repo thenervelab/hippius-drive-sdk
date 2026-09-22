@@ -20,7 +20,14 @@ from hippius_drive._config import Config
 from hippius_drive.client import Client
 from hippius_drive.crypto import kdf, mnemonic_store
 from hippius_drive.identity import Identity
-from hippius_drive.models import RenameSpec, SearchFilters
+from hippius_drive.models import (
+    MAX_LISTING_PAGE_SIZE,
+    MIN_SEARCH_QUERY_LENGTH,
+    BrowseFolderEntry,
+    RemoteFileEntry,
+    RenameSpec,
+    SearchFilters,
+)
 
 FILE_ID_HEX_LEN = 64
 """Length of a hex-encoded path_hash, which is how a file id is spelled."""
@@ -231,26 +238,71 @@ def register(obj: Context, label: str | None, device_name: str | None) -> None:
 @main.command()
 @click.argument("path", default="")
 @click.option("--all", "walk", is_flag=True, help="List every file, not one directory.")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=None,
+    help=f"Show one page of at most this many entries (server max {MAX_LISTING_PAGE_SIZE}).",
+)
+@click.option(
+    "--offset",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Show one page starting at this entry.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
 @click.pass_obj
-def ls(obj: Context, path: str, walk: bool, as_json: bool) -> None:
-    """List one directory, or every file in the folder with --all."""
+def ls(
+    obj: Context, path: str, walk: bool, limit: int | None, offset: int | None, as_json: bool
+) -> None:
+    """List one directory, or every file in the folder with --all.
+
+    With neither --limit nor --offset the whole directory is listed, however
+    many pages that takes. Either flag asks for a single page instead.
+    """
     if path.endswith("/") and not path.startswith("/"):
         path = path.rstrip("/")
     if walk and path:
         raise click.ClickException("ls --all lists the whole folder; omit PATH or drop --all")
+
+    one_page = limit is not None or offset is not None
+    if walk and one_page:
+        raise click.ClickException("ls --all lists the whole folder; drop --limit and --offset")
+
+    next_offset = None
     with obj.client() as client:
         if walk:
             rows = [f.model_dump(mode="json") for f in client.files.iter_state()]
-            has_more = False
+        elif one_page:
+            rows, next_offset = _ls_page(client, path, offset or 0, limit)
         else:
-            result = client.files.browse(path)
-            rows = [{"kind": "dir", **f.model_dump(mode="json")} for f in result.folders]
-            rows += [{"kind": "file", **f.model_dump(mode="json")} for f in result.files]
-            has_more = result.has_more
+            rows = [_ls_row(entry) for entry in client.files.iter_browse(path)]
+
     _emit(rows, as_json, _ls_line)
-    if has_more:
-        click.echo("more entries not shown", err=True)
+    if next_offset is not None:
+        click.echo(f"more entries not shown; pass --offset {next_offset}", err=True)
+
+
+def _ls_page(
+    client: Client, path: str, offset: int, limit: int | None
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Fetch one explicit page and say where the next one starts, if there is one.
+
+    The next offset counts the entries that came back, not ``limit``: the
+    server may return fewer than were asked for.
+    """
+    result = client.files.browse(path, offset=offset, limit=limit)
+    entries = [*result.folders, *result.files]
+    rows = [_ls_row(entry) for entry in entries]
+
+    # An empty page has nowhere further to point, whatever has_more claims.
+    next_offset = offset + len(entries) if result.has_more and entries else None
+    return rows, next_offset
+
+
+def _ls_row(entry: BrowseFolderEntry | RemoteFileEntry) -> dict[str, Any]:
+    kind = "dir" if isinstance(entry, BrowseFolderEntry) else "file"
+    return {"kind": kind, **entry.model_dump(mode="json")}
 
 
 def _ls_line(row: dict[str, Any]) -> str:
@@ -329,7 +381,18 @@ def mv(obj: Context, old: str, new: str) -> None:
 @click.argument("query", required=False)
 @click.option("--type", "file_type", default=None, help="Comma-separated categories or extensions.")
 @click.option("--sort", "sort_by", default=None, help="Sort column.")
-@click.option("--limit", type=int, default=None, help="Results to return.")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=None,
+    help=f"Hits per page; the server defaults to 25 and caps it at {MAX_LISTING_PAGE_SIZE}.",
+)
+@click.option(
+    "--offset",
+    type=click.IntRange(min=0),
+    default=0,
+    help="Skip this many hits; use the value the previous page printed.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
 @click.pass_obj
 def search(
@@ -338,20 +401,43 @@ def search(
     file_type: str | None,
     sort_by: str | None,
     limit: int | None,
+    offset: int,
     as_json: bool,
 ) -> None:
-    """Search every folder on the account."""
+    """Search every folder on the account.
+
+    QUERY needs at least 3 characters; the server matches nothing on less.
+    """
+    _require_searchable(query)
+
     filters = SearchFilters(q=query, file_type=file_type, sort_by=sort_by)
     with obj.client() as client:
-        result = client.files.search(filters, limit=limit)
+        result = client.files.search(filters, offset=offset, limit=limit)
+
     rows = [hit.model_dump(mode="json") for hit in result.files]
     _emit(
         rows,
         as_json,
         lambda r: f"{r['size_bytes']:>12}  {r['folder_label'] or '-'}  {r['relative_path'] or '-'}",
     )
-    if result.has_more:
-        click.echo("more hits not shown; pass --limit", err=True)
+    if result.has_more and rows:
+        # A larger --limit stops helping at the server cap, so point at the next page instead.
+        click.echo(f"more hits not shown; pass --offset {offset + len(rows)}", err=True)
+
+
+def _require_searchable(query: str | None) -> None:
+    """Refuse a term the server would answer with an empty page.
+
+    Sending it would print nothing, which reads as "no such file" when the
+    truth is "the server did not search". An absent or blank term is a
+    different request (list without a name filter) and goes through.
+    """
+    term = (query or "").strip()
+    if term and len(term) < MIN_SEARCH_QUERY_LENGTH:
+        raise click.ClickException(
+            f"search term {term!r} is too short: the server only matches terms of "
+            f"{MIN_SEARCH_QUERY_LENGTH} or more characters"
+        )
 
 
 @main.command()

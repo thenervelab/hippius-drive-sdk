@@ -59,6 +59,12 @@ Identity and folders, file upload (single-shot and resumable chunked sessions),
 streaming download, listing, directory browse, cross-folder search, account
 summaries, quota pre-flight, rename, and delete.
 
+Listing endpoints are paged by the server: `browse` and `search` return at most
+200 entries per request (50 and 25 when no `limit` is given), so use
+`files.iter_browse()` / `files.iter_state()` to walk everything, and page on
+`has_more`, never on `total_count`. A search term shorter than 3 characters
+returns no hits by server policy: an empty page, not an error.
+
 **Not in v1:** the sync engine, file and folder shares, shared drives, recovery
 bindings, mnemonic-blob server endpoints, admin endpoints, and S3-gateway
 variants. The `crypto/` module does implement both mnemonic-at-rest formats

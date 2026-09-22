@@ -71,8 +71,9 @@ not in `__all__` — the CLI and the quickstart both import it.
 | Download to memory | `client.files.get_bytes(file_id)` — not for large files |
 | Path → id, no network | `client.files.file_id("dir/name.ext")` |
 | Every file in this folder | `client.files.iter_state()` (pages on `has_more`) |
-| One directory level | `client.files.browse("work")` |
-| Search every folder on the account | `client.files.search(SearchFilters(q="report"))` |
+| One page of a directory level | `client.files.browse("work")` — server default 50 entries, max 200 |
+| A whole directory level | `client.files.iter_browse("work")` (pages on `has_more`) |
+| Search every folder on the account | `client.files.search(SearchFilters(q="report"))` — max 200 per page; `q` under 3 chars returns no hits |
 | Rename without re-upload | `client.files.rename([RenameSpec(old, new, revision_id)])` |
 | Delete one | `client.files.delete(file_id)` |
 | Delete many (≤1000) | `client.files.delete_many(ids)` — inspect `errors` |
@@ -278,7 +279,9 @@ inject it as `transport=`.
 6. **Models are `extra="ignore"`.** The server adds fields without a version
    bump. Refusing unknown keys breaks on a deploy this repo did not make.
 7. **Page on `has_more`, never on `total_count`.** The total is a maintained
-   counter that can lag a write.
+   counter that can lag a write. Advance `offset` by the rows a page returned,
+   never by the `limit` requested: `/browse` and `/search_files` coerce
+   `limit` down to 200.
 8. **Do not guess `revision_seq`.**
 9. **Warnings are errors** (`filterwarnings = ["error"]` in pytest).
 

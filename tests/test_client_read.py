@@ -242,6 +242,80 @@ def test_browse_root_and_subdirectory(client: Client) -> None:
     assert params["limit"] == "100"
 
 
+FOLDER_JSON = {"name": "taxes", "file_count": 12, "total_bytes": 54321}
+
+
+def _browse_page(folders: int, files: int, has_more: bool) -> httpx.Response:
+    body = {
+        "folders": [FOLDER_JSON] * folders,
+        "files": [FILE_JSON] * files,
+        "has_more": has_more,
+        # Deliberately too low: a walk that trusted it would stop after page one.
+        "total_count": 1,
+    }
+    return httpx.Response(200, json={"Success": body})
+
+
+@respx.mock
+def test_iter_browse_advances_by_entries_returned_not_by_page_size(client: Client) -> None:
+    # The server clamps a page below what was asked for. Folders and files
+    # share one offset space, so both count towards the next offset.
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+    route.side_effect = [
+        _browse_page(folders=2, files=1, has_more=True),
+        _browse_page(folders=0, files=2, has_more=False),
+    ]
+
+    entries = list(client.files.iter_browse("Docs", page_size=1000))
+
+    assert [type(entry).__name__ for entry in entries] == [
+        "BrowseFolderEntry",
+        "BrowseFolderEntry",
+        "RemoteFileEntry",
+        "RemoteFileEntry",
+        "RemoteFileEntry",
+    ]
+    sent = [dict(call.request.url.params) for call in route.calls]
+    assert [params["offset"] for params in sent] == ["0", "3"]
+    assert {params["path"] for params in sent} == {"Docs"}
+
+
+@respx.mock
+def test_iter_browse_asks_for_the_server_maximum_by_default(client: Client) -> None:
+    # Omitting the limit would fall back to the server default of 50 and cost
+    # four times the round trips.
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+    route.return_value = _browse_page(folders=0, files=1, has_more=False)
+
+    assert len(list(client.files.iter_browse())) == 1
+    assert dict(route.calls.last.request.url.params)["limit"] == "200"
+
+
+@respx.mock
+def test_iter_browse_keeps_sort_options_on_every_page(client: Client) -> None:
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+    route.side_effect = [
+        _browse_page(folders=0, files=1, has_more=True),
+        _browse_page(folders=0, files=1, has_more=False),
+    ]
+
+    list(client.files.iter_browse(options=BrowseOptions(sort_by="size_bytes")))
+
+    assert [dict(call.request.url.params)["sort_by"] for call in route.calls] == [
+        "size_bytes",
+        "size_bytes",
+    ]
+
+
+@respx.mock
+def test_iter_browse_stops_on_an_empty_page_even_if_has_more_lies(client: Client) -> None:
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+    route.return_value = _browse_page(folders=0, files=0, has_more=True)
+
+    assert list(client.files.iter_browse()) == []
+    assert route.call_count == 1
+
+
 @respx.mock
 def test_browse_path_argument_wins_over_the_options_object(client: Client) -> None:
     route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
@@ -412,6 +486,21 @@ async def test_async_client_mirrors_the_sync_surface(identity: Identity) -> None
         assert (await client.folders.list()).folders == []
         assert (await client.can_upload(1)).result
         assert [entry.file_name async for entry in client.files.iter_state()] == ["report.pdf"]
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_async_iter_browse_stops_on_an_empty_page_even_if_has_more_lies(
+    identity: Identity,
+) -> None:
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+    route.return_value = _browse_page(folders=0, files=0, has_more=True)
+
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as client:
+        assert [entry async for entry in client.files.iter_browse()] == []
+    assert route.call_count == 1
 
 
 @respx.mock

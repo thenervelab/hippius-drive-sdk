@@ -242,17 +242,97 @@ def test_ls_all_rejects_a_path(env: dict[str, str]) -> None:
     assert "--all" in result.output
 
 
+def _ls_page(folders: int, files: int, has_more: bool) -> httpx.Response:
+    body = {
+        "folders": [{"name": "sub", "file_count": 1, "total_bytes": 5}] * folders,
+        "files": [FILE_JSON] * files,
+        "has_more": has_more,
+    }
+    return httpx.Response(200, json={"Success": body})
+
+
 @respx.mock
-def test_ls_notes_when_a_page_is_truncated(env: dict[str, str]) -> None:
-    respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
-        return_value=httpx.Response(
-            200,
-            json={"Success": {"folders": [], "files": [FILE_JSON], "has_more": True}},
-        )
-    )
-    result = run(["ls"], env)
+def test_ls_walks_every_page_of_a_directory(env: dict[str, str]) -> None:
+    # The server default page is 50 entries, so a bare `ls` that read one page
+    # would silently hide the rest of a large directory.
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+    route.side_effect = [
+        _ls_page(folders=1, files=2, has_more=True),
+        _ls_page(folders=0, files=2, has_more=False),
+    ]
+
+    result = run(["ls", "work"], env)
+
     assert result.exit_code == 0
-    assert "more entries not shown" in result.output
+    lines = result.output.strip().splitlines()
+    assert [line.split()[0] for line in lines] == ["dir", "file", "file", "file", "file"]
+    assert "more entries" not in result.output
+
+    sent = [dict(call.request.url.params) for call in route.calls]
+    assert [params["offset"] for params in sent] == ["0", "3"]
+    assert {params["limit"] for params in sent} == {"200"}
+    assert {params["path"] for params in sent} == {"work"}
+
+
+@respx.mock
+def test_ls_json_holds_every_page_in_one_document(env: dict[str, str]) -> None:
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+    route.side_effect = [
+        _ls_page(folders=1, files=0, has_more=True),
+        _ls_page(folders=0, files=1, has_more=False),
+    ]
+
+    rows = json.loads(run(["ls", "--json"], env).output)
+
+    assert [row["kind"] for row in rows] == ["dir", "file"]
+
+
+@respx.mock
+def test_ls_limit_fetches_one_page_and_names_the_next_offset(env: dict[str, str]) -> None:
+    # Asked for 500, got 3 back: the next offset follows what came back.
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
+        return_value=_ls_page(folders=1, files=2, has_more=True)
+    )
+
+    result = run(["ls", "--limit", "500", "--offset", "10"], env)
+
+    assert result.exit_code == 0
+    assert route.call_count == 1
+    params = dict(route.calls.last.request.url.params)
+    assert params["limit"] == "500"
+    assert params["offset"] == "10"
+    assert "more entries not shown; pass --offset 13" in result.output
+
+
+@respx.mock
+def test_ls_offset_alone_is_still_a_single_page(env: dict[str, str]) -> None:
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
+        return_value=_ls_page(folders=0, files=1, has_more=False)
+    )
+
+    result = run(["ls", "--offset", "50"], env)
+
+    assert route.call_count == 1
+    params = dict(route.calls.last.request.url.params)
+    assert params["offset"] == "50"
+    assert "limit" not in params
+    assert "more entries" not in result.output
+
+
+@respx.mock
+def test_ls_page_with_no_entries_offers_no_next_offset(env: dict[str, str]) -> None:
+    respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
+        return_value=_ls_page(folders=0, files=0, has_more=True)
+    )
+
+    assert "--offset" not in run(["ls", "--limit", "5"], env).output
+
+
+@pytest.mark.parametrize("flag", [["--limit", "5"], ["--offset", "5"]])
+def test_ls_all_rejects_paging_flags(env: dict[str, str], flag: list[str]) -> None:
+    result = run(["ls", "--all", *flag], env)
+    assert result.exit_code != 0
+    assert "--limit and --offset" in result.output
 
 
 @respx.mock
@@ -429,17 +509,68 @@ def test_search_passes_the_filters(env: dict[str, str]) -> None:
 
 
 @respx.mock
-def test_search_notes_when_results_are_truncated(env: dict[str, str]) -> None:
-    respx.get(f"{BASE}/search_files/{SS58}").mock(
-        return_value=httpx.Response(
-            200,
-            json={"Success": {"files": [{**FILE_JSON, "folder_label": "Docs"}], "has_more": True}},
-        )
+def test_search_points_at_the_next_offset_when_results_are_truncated(
+    env: dict[str, str],
+) -> None:
+    # "pass --limit" stops being true at the server cap; the next page is the
+    # only thing that always works, and it starts after the hits that came back.
+    hit = {**FILE_JSON, "folder_label": "Docs"}
+    route = respx.get(f"{BASE}/search_files/{SS58}").mock(
+        return_value=httpx.Response(200, json={"Success": {"files": [hit, hit], "has_more": True}})
     )
-    result = run(["search", "report"], env)
+
+    result = run(["search", "report", "--offset", "200", "--limit", "500"], env)
+
     assert result.exit_code == 0
-    assert "more hits not shown" in result.output
-    assert "offset" not in result.output
+    params = dict(route.calls.last.request.url.params)
+    assert params["offset"] == "200"
+    assert params["limit"] == "500"
+    assert "more hits not shown; pass --offset 202" in result.output
+    assert "--limit" not in result.output
+
+
+@respx.mock
+def test_search_without_offset_starts_at_zero(env: dict[str, str]) -> None:
+    hit = {**FILE_JSON, "folder_label": "Docs"}
+    route = respx.get(f"{BASE}/search_files/{SS58}").mock(
+        return_value=httpx.Response(200, json={"Success": {"files": [hit], "has_more": True}})
+    )
+
+    result = run(["search", "report"], env)
+
+    assert dict(route.calls.last.request.url.params)["offset"] == "0"
+    assert "pass --offset 1" in result.output
+
+
+@respx.mock
+@pytest.mark.parametrize("term", ["a", "ab", "  ab  "])
+def test_search_refuses_a_term_the_server_would_not_match(env: dict[str, str], term: str) -> None:
+    # The server answers a 1-2 character term with an empty page. Printing
+    # nothing would read as "no such file", so say why and send nothing.
+    route = respx.get(f"{BASE}/search_files/{SS58}")
+
+    result = run(["search", term], env)
+
+    assert result.exit_code == 1
+    assert "too short" in result.output
+    assert "3 or more characters" in result.output
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_search_with_no_term_still_lists(env: dict[str, str]) -> None:
+    # No term is a filter-only listing, not a short query.
+    route = respx.get(f"{BASE}/search_files/{SS58}").mock(
+        return_value=httpx.Response(200, json={"Success": {"files": [], "has_more": False}})
+    )
+
+    assert run(["search", "--type", "image"], env).exit_code == 0
+    assert route.call_count == 1
+
+
+def test_listing_help_states_the_server_cap() -> None:
+    assert "200" in run(["search", "--help"]).output
+    assert "200" in run(["ls", "--help"]).output
 
 
 @respx.mock
