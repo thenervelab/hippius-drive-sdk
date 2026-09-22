@@ -83,6 +83,18 @@ def test_leave_always_names_the_owner() -> None:
 
 
 @respx.mock
+def test_a_bad_invite_is_rejected_before_the_mint(client: Client) -> None:
+    post = respx.post(f"{BASE}/v1/drive-invites").mock(return_value=httpx.Response(500))
+    with pytest.raises(ValueError, match="BIP-39"):
+        client.drives.create_invite(InviteSpec("not a phrase"))
+    with pytest.raises(ValueError, match="https"):
+        client.drives.create_invite(
+            InviteSpec(_phrase(), console_base_url="http://console.example")
+        )
+    assert post.calls == []
+
+
+@respx.mock
 def test_a_reader_cannot_mint_an_invite() -> None:
     member = Identity.for_shared_drive(
         _phrase(), owner_ss58=SS58, folder_hash=FOLDER, role="reader"

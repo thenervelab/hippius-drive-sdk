@@ -105,6 +105,27 @@ def entropy_from_phrase(phrase: str) -> bytes:
     return entropy
 
 
+def console_origin(console_base_url: str) -> str:
+    """Return ``console_base_url`` without a trailing slash.
+
+    Checked before an invite is minted. A bad origin must not leave a live
+    invite whose token the caller never sees.
+
+    Args:
+        console_base_url: Console origin the recipient URL is built against.
+
+    Returns:
+        The origin.
+
+    Raises:
+        ValueError: If the origin is not https.
+    """
+    trimmed = console_base_url.rstrip("/")
+    if not trimmed.startswith("https://"):
+        raise ValueError("console_base_url must be an https origin")
+    return trimmed
+
+
 def invite_url(console_base_url: str, token: str, entropy: bytes) -> str:
     """Build ``{base}/invite/{token}#k={entropy}``.
 
@@ -121,9 +142,7 @@ def invite_url(console_base_url: str, token: str, entropy: bytes) -> str:
     """
     if len(entropy) != _KEY_LEN:
         raise ValueError(f"folder-key entropy must be {_KEY_LEN} bytes, got {len(entropy)}")
-    trimmed = console_base_url.rstrip("/")
-    if not trimmed.startswith("https://"):
-        raise ValueError("console_base_url must be an https origin")
+    trimmed = console_origin(console_base_url)
     if not token or "/" in token or "#" in token:
         raise ValueError("invite token must be a single path segment")
     fragment = base64.urlsafe_b64encode(entropy).rstrip(b"=").decode()

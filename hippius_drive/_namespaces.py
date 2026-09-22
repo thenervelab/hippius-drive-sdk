@@ -309,7 +309,8 @@ class FolderShareOps:
             The page. Page on ``has_more``.
         """
         token, _key = _links.share_key_from_url(share_url, password, folder=True)
-        return self._client.run(_ops.folder_share_browse(token, path, offset, limit))
+        relative = _links.recipient_path(path)
+        return self._client.run(_ops.folder_share_browse(token, relative, offset, limit))
 
     def get(self, share_url: str, path: str, *, password: str | None = None) -> bytes:
         """Download and decrypt one file inside a folder share.
@@ -323,7 +324,7 @@ class FolderShareOps:
             The plaintext.
         """
         token, key = _links.share_key_from_url(share_url, password, folder=True)
-        request = _ops.folder_share_blob(token, path)
+        request = _ops.folder_share_blob(token, _links.recipient_path(path))
         with self._client.transport.stream(request) as response:
             return _decrypt(response, key)
 
@@ -598,12 +599,13 @@ class AsyncFolderShareOps:
     ) -> FolderSharePage:
         """Async twin of :meth:`FolderShareOps.browse`."""
         token, _key = _links.share_key_from_url(share_url, password, folder=True)
-        return await self._client.run(_ops.folder_share_browse(token, path, offset, limit))
+        relative = _links.recipient_path(path)
+        return await self._client.run(_ops.folder_share_browse(token, relative, offset, limit))
 
     async def get(self, share_url: str, path: str, *, password: str | None = None) -> bytes:
         """Async twin of :meth:`FolderShareOps.get`."""
         token, key = _links.share_key_from_url(share_url, password, folder=True)
-        request = _ops.folder_share_blob(token, path)
+        request = _ops.folder_share_blob(token, _links.recipient_path(path))
         async with self._client.transport.stream(request) as response:
             return await _decrypt_async(response, key)
 

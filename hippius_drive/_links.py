@@ -293,12 +293,19 @@ def invite_body(identity: Identity, spec: InviteSpec) -> dict[str, Any]:
     """The invite mint body. A manager names the drive owner.
 
     Raises:
-        ValueError: If the caller cannot mint, or the role is unknown.
+        ValueError: If the caller cannot mint, the role is unknown, the
+            folder phrase is not 24-word BIP-39, or the console origin
+            is not https.
     """
     if identity.role not in {OWNER, MANAGER}:
         raise ValueError("only the owner or a manager can mint an invite")
     if spec.role not in _ROLES:
         raise ValueError("role must be reader, writer, or manager")
+    # Phrase and origin are checked again when the URL is built. Doing it
+    # here means a ValueError happens before the server has minted a token
+    # the caller will never receive.
+    grant.entropy_from_phrase(spec.folder_mnemonic)
+    grant.console_origin(spec.console_base_url)
     body: dict[str, Any] = {"folder_hash": identity.folder_hash, "role": spec.role}
     if spec.expires_in_secs is not None:
         body["expires_in_secs"] = spec.expires_in_secs
@@ -491,6 +498,27 @@ def _fragment(key: bytes, password: str | None) -> ShareSecret:
     return ShareSecret(sharing.wrap_share_key(password, key), private=True)
 
 
+def recipient_path(path: str) -> str:
+    """Return the path a folder-share read sends. Empty stays the share root.
+
+    Mint normalizes every non-empty prefix. A recipient path has to match,
+    because the server answers a non-NFC path with an empty 404, the same
+    status as a revoked share.
+
+    Args:
+        path: Directory or file relative to the share prefix.
+
+    Returns:
+        ``""`` for the share root, otherwise the NFC relative path.
+
+    Raises:
+        ValueError: If a non-empty path is not a relative POSIX path.
+    """
+    if path == "":
+        return ""
+    return hashes.normalize_relative_path(path)
+
+
 def wire_ttl(value: ShareTtl | str) -> str:
     if isinstance(value, ShareTtl):
         return value.value
@@ -508,6 +536,13 @@ def _encrypt(source: PlaintextSource, key: bytes) -> tuple[IO[bytes], int]:
             for frame in file_cipher.encrypt_stream(reader, key, source.size):
                 blob.write(frame)
                 written += len(frame)
+            # A declared size that lands on a frame boundary is read exactly,
+            # so bytes appended during encryption would otherwise ship as a
+            # valid shorter file. Drive upload peeks for the same reason.
+            if reader.read(1):
+                raise ValueError(
+                    f"declared plaintext_size {source.size}, file grew while it was being read"
+                )
     except BaseException:
         blob.close()
         raise

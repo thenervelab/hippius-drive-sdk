@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+import unicodedata
 from typing import cast
 
 import blake3
@@ -401,6 +403,56 @@ def test_membership_round_trip_opens_the_frozen_grant() -> None:
     rows = client.drives.memberships(MASTER, member_ss58=SS58)
     assert rows[0].folder_mnemonic == phrase
     assert rows[1].folder_mnemonic is None
+
+
+def test_a_share_that_grows_past_a_full_frame_is_rejected() -> None:
+    grown = b"x" * (file_cipher.CHUNK_SIZE + 50)
+    source = PlaintextSource(open=lambda: io.BytesIO(grown), size=file_cipher.CHUNK_SIZE)
+    with pytest.raises(ValueError, match="file grew"):
+        _links.prepare_file_share(source, FileShareSpec("a.bin"))
+
+
+def test_an_empty_share_that_gains_bytes_is_rejected() -> None:
+    source = PlaintextSource(open=lambda: io.BytesIO(b"now"), size=0)
+    with pytest.raises(ValueError, match="file grew"):
+        _links.prepare_file_share(source, FileShareSpec("a.bin"))
+
+
+def test_a_frame_aligned_share_that_did_not_grow_encrypts() -> None:
+    payload = b"y" * file_cipher.CHUNK_SIZE
+    source = PlaintextSource(open=lambda: io.BytesIO(payload), size=len(payload))
+    prepared = _links.prepare_file_share(source, FileShareSpec("a.bin"))
+    try:
+        assert prepared.plaintext_size == len(payload)
+        assert prepared.ciphertext_size == file_cipher.ciphertext_size(len(payload))
+    finally:
+        prepared.close()
+
+
+@respx.mock
+def test_folder_share_reads_send_nfc_and_refuse_traversal() -> None:
+    client = _owner()
+    nfd = "caf\u0301"
+    nfc = unicodedata.normalize("NFC", nfd)
+    key = client.identity.encryption_key
+    url = sharing.folder_share_url("https://console.hippius.com", "fold", key)
+    browse = respx.get(url__regex=r".*/folder-shares/fold/browse").mock(
+        return_value=httpx.Response(200, json={"files": [], "directories": [], "has_more": False})
+    )
+    assert client.folder_shares.browse(url, nfd).files == []
+    assert browse.calls.last.request.url.params["path"] == nfc
+    blob = file_cipher.encrypt_bytes(b"z", key)
+    download = respx.get(url__regex=r".*/folder-shares/fold/blob").mock(
+        return_value=httpx.Response(200, content=blob)
+    )
+    assert client.folder_shares.get(url, nfd) == b"z"
+    assert download.calls.last.request.url.params["path"] == nfc
+    with pytest.raises(ValueError, match="relative_path"):
+        client.folder_shares.browse(url, "a/../b")
+    with pytest.raises(ValueError, match="relative_path"):
+        client.folder_shares.get(url, "..")
+    assert len(browse.calls) == 1
+    assert len(download.calls) == 1
 
 
 @respx.mock
