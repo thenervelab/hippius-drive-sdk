@@ -158,6 +158,82 @@ manifest replaces, so a refusal here can still succeed on upload. An `error`
 mentioning billing means a transient backend failure worth retrying, not a quota
 verdict.
 
+## Sharing a file
+
+A file share is a fresh ciphertext under a new key. The console URL's fragment
+is that key. Hand the URL to the recipient; opening it needs no account.
+
+```python
+from hippius_drive import FileShareSpec
+
+created = client.shares.create(Path("report.pdf"), FileShareSpec("report.pdf"))
+print(created.share_url)
+
+opened = client.shares.open(created.share_url)
+```
+
+`FileShareSpec` takes a ttl (`24h`, `7d`, `30d`, `never`) and an optional
+password of at least 8 characters. A password link uses `#p=` and the raw key
+is not in the URL. `open` then needs that password.
+
+The same client lists and revokes with `shares.list()` and `shares.revoke(token)`.
+A file larger than one 8 MiB ciphertext uses the chunked share routes on its own.
+
+## Sharing a folder
+
+A folder share does not upload anything. The fragment is this drive's file key,
+so anyone holding the link can decrypt the files the token's prefix allows the
+server to serve.
+
+```python
+from hippius_drive import FolderShareSpec
+
+created = client.folder_shares.create(FolderShareSpec("work", "Work"))
+print(created.share_url)
+```
+
+An empty `path_prefix` shares the whole drive. The listing returns `token_hash`,
+not the plaintext token. `revoke` and `update_ttl` accept either the token from
+`create` or that 64-character hash.
+
+## A shared drive
+
+A shared drive is one folder on the owner's account. Members use their own API
+token. `Identity.account_ss58` on a member client is the **owner's** address:
+paths and `salted_hash` are salted with it. The member's token is the bearer.
+
+```python
+from hippius_drive import Identity, InviteSpec
+from hippius_drive.crypto import kdf
+
+folder_phrase = kdf.derive_folder_mnemonic(phrase, "default")
+invite = client.drives.create_invite(InviteSpec(folder_phrase, role="writer"))
+print(invite.invite_url)
+```
+
+The recipient joins with their own master phrase and the account their token
+resolves to. That address is not derived from the phrase.
+
+```python
+accepted = member.drives.accept(invite.invite_url, member_phrase, member_ss58=member_account)
+member_identity = Identity.for_shared_drive(
+    accepted.folder_mnemonic,
+    owner_ss58=accepted.owner_ss58,
+    folder_hash=accepted.folder_hash,
+    role=accepted.role,
+)
+```
+
+`folder_hash` is the owner's id from the invite. It is not recomputed from a
+label the member invented. A reader cannot upload. Registering and unregistering
+the folder stay with the owner. The owner pays for bytes members write. Losing
+the owner's phrase loses the drive, including files members uploaded.
+
+`drives.memberships(member_phrase, member_ss58=member_account)` lists drives
+this account has joined and opens each grant. `Client(..., identity=member_identity)`
+then calls `files`, `folder_shares`, and `drives.leave(member_account)` the
+same way an owner calls them.
+
 ## Async
 
 ```python
@@ -188,7 +264,8 @@ Every failure the service, the transport or the decrypt step reports is a
 | `Unauthorized` | 401 | Token missing, malformed or rejected |
 | `Forbidden` | 403 | Token resolves to a different account than the request names |
 | `QuotaExceeded` | 402 | Over the plan allowance; carries the credit figures when given |
-| `NotFound` | 404 | No such file, folder or session |
+| `NotFound` | 404 | No such file, folder, share, or session |
+| `Gone` | 410 | Invite revoked, expired, or exhausted |
 | `Conflict` | 409 | Stale `base_revision_id`; carries the current revision |
 | `PayloadTooLarge` | 413 | A multipart field exceeded its cap |
 | `RateLimited` | 429 | Too many live sessions; carries `retry_after` |

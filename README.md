@@ -57,7 +57,10 @@ phrase is separate.**
 
 Identity and folders, file upload (single-shot and resumable chunked sessions),
 streaming download, listing, directory browse, cross-folder search, account
-summaries, quota pre-flight, rename, and delete.
+summaries, quota pre-flight, rename, and delete. File shares and folder shares
+mint a console link whose fragment is the decryption key. Shared drives let a
+second account join a folder with its own token; the member receives that
+folder's file key, and the owner's recovery phrase stays with the owner.
 
 Listing endpoints are paged by the server: `browse` and `search` return at most
 200 entries per request (50 and 25 when no `limit` is given), so use
@@ -65,11 +68,11 @@ Listing endpoints are paged by the server: `browse` and `search` return at most
 `has_more`, never on `total_count`. A search term shorter than 3 characters
 returns no hits by server policy: an empty page, not an error.
 
-**Not in v1:** the sync engine, file and folder shares, shared drives, recovery
-bindings, mnemonic-blob server endpoints, admin endpoints, and S3-gateway
-variants. The `crypto/` module does implement both mnemonic-at-rest formats
-(the desktop `enc_mnemonic.json` and the console's Argon2id sealed blob), since
-the CLI needs the first and interoperability needs the second.
+**Not in v1:** the sync engine, recovery bindings, mnemonic-blob server
+endpoints, admin endpoints, and S3-gateway variants. The `crypto/` module does
+implement both mnemonic-at-rest formats (the desktop `enc_mnemonic.json` and
+the console's Argon2id sealed blob), since the CLI needs the first and
+interoperability needs the second.
 
 ## Security
 
@@ -93,7 +96,9 @@ interim oracle is the hex and strings pinned in the unit tests (see
 This repository's live suite (`pytest -m e2e`) runs in CI when
 `HIPPIUS_TEST_*` secrets are present. It covers registration, upload
 (single-shot and chunked session), download, listing, browse, search,
-optimistic-concurrency conflicts, rename, and delete.
+optimistic-concurrency conflicts, rename, delete, and a file-share round trip
+when that route is mounted. A shared-drive round trip runs only when
+`HIPPIUS_TEST_TOKEN_2` and `HIPPIUS_TEST_ACCOUNT_SS58_2` are set.
 
 ## Development
 

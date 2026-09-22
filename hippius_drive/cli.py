@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import click
 
-from hippius_drive import __version__, _config, errors
+from hippius_drive import FileShareSpec, FolderShareSpec, InviteSpec, __version__, _config, errors
 from hippius_drive._config import Config
 from hippius_drive.client import Client
 from hippius_drive.crypto import kdf, mnemonic_store
@@ -32,6 +33,12 @@ from hippius_drive.models import (
 FILE_ID_HEX_LEN = 64
 """Length of a hex-encoded path_hash, which is how a file id is spelled."""
 
+_CONSOLE = "https://console.hippius.com"
+"""Console origin a minted link uses unless ``--console`` says otherwise."""
+
+_DAY_SECONDS = 86_400
+"""Seconds in a day, for ``invite put --days``."""
+
 
 @dataclass
 class Context:
@@ -42,6 +49,8 @@ class Context:
     """
 
     config: Config
+    # Unlocked at most once per command, and kept off ``repr``.
+    _phrase: str | None = field(default=None, repr=False)
 
     def identity(self) -> Identity:
         """Unlock the mnemonic file and derive the folder identity.
@@ -58,12 +67,30 @@ class Context:
             raise click.ClickException(
                 f"no mnemonic at {cfg.mnemonic_file}; run 'hippius-drive init' first"
             )
+        return Identity.from_master(self.master(), cfg.label, account_ss58=account)
+
+    def master(self) -> str:
+        """Unlock the mnemonic file and return the master phrase.
+
+        Returns:
+            The master BIP-39 phrase. The caller must not print or log it.
+
+        Raises:
+            ClickException: If the file is missing or will not open.
+        """
+        if self._phrase is not None:
+            return self._phrase
+        cfg = self.config
+        if not cfg.mnemonic_file.exists():
+            raise click.ClickException(
+                f"no mnemonic at {cfg.mnemonic_file}; run 'hippius-drive init' first"
+            )
         password = cfg.password if cfg.password is not None else _prompt_password()
         try:
-            master = mnemonic_store.load(cfg.mnemonic_file, password)
+            self._phrase = mnemonic_store.load(cfg.mnemonic_file, password)
         except mnemonic_store.MnemonicStoreError as exc:
             raise click.ClickException(str(exc)) from exc
-        return Identity.from_master(master, cfg.label, account_ss58=account)
+        return self._phrase
 
     def client(self) -> Client:
         """Build a client for the configured account, folder, and server.
@@ -452,6 +479,250 @@ def quota(obj: Context, size: int | None) -> None:
         if size is not None:
             verdict = client.can_upload(size)
             click.echo(f"can_upload   {verdict.result}  {verdict.error or ''}".rstrip())
+
+
+@main.group()
+def share() -> None:
+    """Mint, list, and revoke file-share links."""
+
+
+@share.command("put")
+@click.argument("local", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--name", required=True, help="Filename the recipient sees.")
+@click.option(
+    "--ttl",
+    type=click.Choice(["24h", "7d", "30d", "never"]),
+    default="24h",
+    show_default=True,
+    help="How long the link stays reachable.",
+)
+@click.option("--password", default=None, help="Password-wrap the link. At least 8 characters.")
+@click.option("--console", default=_CONSOLE, show_default=True, help="Console origin for the link.")
+@click.pass_obj
+def share_put(
+    obj: Context, local: Path, name: str, ttl: str, password: str | None, console: str
+) -> None:
+    """Encrypt LOCAL under a fresh key and print a console link."""
+    spec = FileShareSpec(name, ttl=ttl, password=password, console_base_url=console)
+    with obj.client() as client:
+        created = client.shares.create(local, spec)
+    click.echo(created.share_url)
+
+
+@share.command("ls")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.pass_obj
+def share_ls(obj: Context, as_json: bool) -> None:
+    """List this account's file shares."""
+    with obj.client() as client:
+        rows = [_share_row(item) for item in client.shares.list()]
+    _emit(rows, as_json, _share_line)
+
+
+@share.command("rm")
+@click.argument("token")
+@click.pass_obj
+def share_rm(obj: Context, token: str) -> None:
+    """Revoke a file share by its plaintext token."""
+    with obj.client() as client:
+        client.shares.revoke(token)
+    click.echo("revoked")
+
+
+@main.group("folder-share")
+def folder_share() -> None:
+    """Mint, list, and revoke folder-share links."""
+
+
+@folder_share.command("put")
+@click.option(
+    "--prefix",
+    default="",
+    help="Drive-relative directory. Empty shares the whole drive.",
+)
+@click.option("--name", required=True, help="Name shown to the recipient.")
+@click.option(
+    "--ttl",
+    type=click.Choice(["24h", "7d", "30d", "never"]),
+    default="24h",
+    show_default=True,
+    help="How long the link stays reachable.",
+)
+@click.option("--password", default=None, help="Password-wrap the link. At least 8 characters.")
+@click.option("--console", default=_CONSOLE, show_default=True, help="Console origin for the link.")
+@click.pass_obj
+def folder_share_put(
+    obj: Context, prefix: str, name: str, ttl: str, password: str | None, console: str
+) -> None:
+    """Mint a link to an existing drive prefix and print it."""
+    spec = FolderShareSpec(prefix, name, ttl=ttl, password=password, console_base_url=console)
+    with obj.client() as client:
+        created = client.folder_shares.create(spec)
+    click.echo(created.share_url)
+
+
+@folder_share.command("ls")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.pass_obj
+def folder_share_ls(obj: Context, as_json: bool) -> None:
+    """List folder shares this account controls."""
+    with obj.client() as client:
+        rows = [_folder_row(item) for item in client.folder_shares.list()]
+    _emit(rows, as_json, _folder_line)
+
+
+@folder_share.command("rm")
+@click.argument("token")
+@click.pass_obj
+def folder_share_rm(obj: Context, token: str) -> None:
+    """Revoke a folder share by plaintext token or by token_hash."""
+    with obj.client() as client:
+        client.folder_shares.revoke(token)
+    click.echo("revoked")
+
+
+@main.group()
+def invite() -> None:
+    """Mint and accept shared-drive invites."""
+
+
+@invite.command("put")
+@click.option(
+    "--role",
+    type=click.Choice(["reader", "writer", "manager"]),
+    default="writer",
+    show_default=True,
+    help="Role the invite grants.",
+)
+@click.option("--days", type=click.IntRange(min=1), default=None, help="Lifetime in days.")
+@click.option("--console", default=_CONSOLE, show_default=True, help="Console origin for the link.")
+@click.pass_obj
+def invite_put(obj: Context, role: str, days: int | None, console: str) -> None:
+    """Mint an invite to the configured folder and print the URL."""
+    phrase = kdf.derive_folder_mnemonic(obj.master(), obj.config.label)
+    expires = None if days is None else days * _DAY_SECONDS
+    spec = InviteSpec(phrase, role=role, expires_in_secs=expires, console_base_url=console)
+    with obj.client() as client:
+        created = client.drives.create_invite(spec)
+    click.echo(created.invite_url)
+
+
+@invite.command("accept")
+@click.argument("url")
+@click.pass_obj
+def invite_accept(obj: Context, url: str) -> None:
+    """Join a drive. Prints the drive id and role."""
+    account = _account(obj)
+    with obj.client() as client:
+        accepted = client.drives.accept(url, obj.master(), member_ss58=account)
+    click.echo(f"owner        {accepted.owner_ss58}")
+    click.echo(f"folder_hash  {accepted.folder_hash}")
+    click.echo(f"role         {accepted.role}")
+
+
+@main.group(invoke_without_command=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.pass_context
+def drives(ctx: click.Context, as_json: bool) -> None:
+    """List drives this account has joined."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _print_drives(ctx.obj, as_json)
+
+
+@drives.command("leave")
+@click.argument("owner_ss58")
+@click.argument("folder_hash")
+@click.pass_obj
+def drives_leave(obj: Context, owner_ss58: str, folder_hash: str) -> None:
+    """Leave a joined drive. OWNER_SS58 and FOLDER_HASH come from ``drives``."""
+    account = _account(obj)
+    with obj.client() as client:
+        rows = client.drives.memberships(obj.master(), member_ss58=account)
+    phrase, owner, folder, role, label = _joined(rows, owner_ss58, folder_hash)
+    identity = Identity.for_shared_drive(
+        phrase,
+        owner_ss58=owner,
+        folder_hash=folder,
+        role=role,
+        label=label,
+    )
+    token = _checked(obj.config.require_token)
+    with Client(token=token, identity=identity, server_url=obj.config.server_url) as member:
+        member.drives.leave(account)
+    click.echo("left")
+
+
+def _account(obj: Context) -> str:
+    account: str = _checked(obj.config.require_account)
+    return account
+
+
+def _print_drives(obj: Context, as_json: bool) -> None:
+    account = _account(obj)
+    with obj.client() as client:
+        memberships = client.drives.memberships(obj.master(), member_ss58=account)
+    rows = [_drive_row(row) for row in memberships]
+    _emit(rows, as_json, _drive_line)
+
+
+def _share_row(item: Any) -> dict[str, Any]:
+    return {
+        "share_token": item.share_token,
+        "filename": item.filename,
+        "plaintext_size": item.plaintext_size,
+        "expires_at": item.expires_at,
+    }
+
+
+def _folder_row(item: Any) -> dict[str, Any]:
+    return {
+        "token_hash": item.token_hash,
+        "path_prefix": item.path_prefix,
+        "display_name": item.display_name,
+        "expires_at": item.expires_at,
+    }
+
+
+def _drive_row(item: Any) -> dict[str, Any]:
+    return {
+        "owner_ss58": item.owner_ss58,
+        "folder_hash": item.folder_hash,
+        "role": item.role,
+        "display_label": item.display_label,
+        "frozen": item.frozen,
+    }
+
+
+def _share_line(row: dict[str, Any]) -> str:
+    expiry = row["expires_at"] or "never"
+    return f"{row['plaintext_size']:>12}  {expiry:<20}  {row['share_token']}  {row['filename']}"
+
+
+def _folder_line(row: dict[str, Any]) -> str:
+    expiry = row["expires_at"] or "never"
+    prefix = row["path_prefix"] or "."
+    return f"{expiry:<20}  {row['token_hash']}  {prefix}  {row['display_name']}"
+
+
+def _drive_line(row: dict[str, Any]) -> str:
+    frozen = "  frozen" if row["frozen"] else ""
+    label = row["display_label"] or row["folder_hash"]
+    return f"{row['role']:<8}  {row['owner_ss58']}  {row['folder_hash']}  {label}{frozen}"
+
+
+def _joined(rows: Sequence[Any], owner: str, folder: str) -> tuple[str, str, str, str, str]:
+    """Return the phrase, owner, hash, role, and label for one joined drive."""
+    for row in rows:
+        if row.owner_ss58 != owner or row.folder_hash != folder:
+            continue
+        phrase = row.folder_mnemonic
+        if not isinstance(phrase, str) or not phrase:
+            raise click.ClickException("this drive has no grant; it cannot be opened")
+        label = row.display_label if isinstance(row.display_label, str) else ""
+        role = row.role if isinstance(row.role, str) else ""
+        return phrase, owner, folder, role, label
+    raise click.ClickException("no membership for that owner and folder")
 
 
 def _as_file_id(client: Client, target: str) -> str:

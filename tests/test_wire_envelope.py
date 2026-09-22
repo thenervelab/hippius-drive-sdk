@@ -22,6 +22,23 @@ def test_unenveloped_success_passes_through() -> None:
     assert parse_envelope(200, {"relative_paths": []}) == {"relative_paths": []}
 
 
+def test_a_json_array_and_an_empty_body_are_successes() -> None:
+    assert parse_envelope(200, [{"share_token": "t"}]) == [{"share_token": "t"}]
+    assert parse_envelope(204, "") is None
+    assert parse_envelope(204, None) is None
+
+
+def test_an_empty_404_is_not_found_and_410_is_gone() -> None:
+    with pytest.raises(errors.NotFound):
+        parse_envelope(404, "")
+    with pytest.raises(errors.Gone) as exc:
+        parse_envelope(410, "")
+    assert exc.value.status == 410
+    with pytest.raises(errors.Gone) as detailed:
+        parse_envelope(410, {"error": "invite_unusable", "message": "expired"})
+    assert detailed.value.code == "invite_unusable"
+
+
 def test_error_maps_status_and_code() -> None:
     with pytest.raises(errors.NotFound) as exc:
         parse_envelope(404, {"Error": {"error": "not_found", "message": "nope"}})

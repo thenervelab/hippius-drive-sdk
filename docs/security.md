@@ -131,6 +131,35 @@ It is still not a pattern to copy into new designs. Separate keys for separate
 purposes costs nothing and removes a class of cross-protocol argument you would
 otherwise have to make carefully.
 
+## Share links
+
+A file-share URL is a decryption key for that one copy. The server stores the
+ciphertext and the encrypted filename. The `#k=` fragment, or the password that
+unwraps a `#p=` fragment, is what opens it. Anyone who receives the URL can
+read the file until the share is revoked or it expires. Revocation stops new
+downloads; it does not reach a copy someone already saved.
+
+A folder-share `#k=` fragment is the drive's file key, the same key that
+decrypts every file in that folder. The token limits which paths the server
+will serve. Anyone with the link can decrypt those files. A password wrap
+(`#p=`) keeps the raw key out of the URL; the password is then the secret.
+
+Treat both URLs as secrets. Do not put them in logs, tickets, or shell history
+you share.
+
+## Shared drives
+
+Joining a drive gives the member that drive's file key, carried in the invite
+fragment and sealed into the member's grant. The member can decrypt the files
+in the drive. The owner's master recovery phrase stays with the owner. A member
+token cannot register or unregister the folder, and a reader cannot upload.
+
+Paths and content fingerprints are salted with the owner's account address, so
+a member's uploads land in the owner's namespace. The owner pays for those
+bytes. Losing the owner's phrase loses the drive, including files members wrote.
+Removing a member stops their future requests; it does not rotate the file key,
+so a member who copied the phrase can still decrypt ciphertext they kept.
+
 ## Reporting a vulnerability
 
 Please report privately rather than opening a public issue: use GitHub's
