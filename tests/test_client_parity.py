@@ -385,3 +385,34 @@ async def test_invite_mint_agrees_across_clients(identity: Identity) -> None:
     assert sync_created.invite_url.startswith(prefix)
     assert async_created.invite_url == sync_created.invite_url
     assert sealed.call_count == 2
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_both_clients_page_iter_browse_identically(identity: Identity) -> None:
+    folder = {"name": "taxes", "file_count": 1, "total_bytes": 2}
+    pages = [
+        httpx.Response(
+            200, json={"Success": {"folders": [folder], "files": [FILE_JSON], "has_more": True}}
+        ),
+        httpx.Response(200, json={"Success": {"folders": [], "files": [FILE_JSON]}}),
+    ]
+    route = respx.get(f"{BASE}/browse/{SS58}/{FOLDER}")
+
+    route.side_effect = list(pages)
+    with Client(token="tok", identity=identity, transport=Transport(BASE, "tok")) as client:
+        sync_names = [type(entry).__name__ for entry in client.files.iter_browse("Docs")]
+    sync_params = [dict(call.request.url.params) for call in route.calls]
+
+    route.reset()
+    route.side_effect = list(pages)
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as aclient:
+        async_names = [type(entry).__name__ async for entry in aclient.files.iter_browse("Docs")]
+    async_params = [dict(call.request.url.params) for call in route.calls]
+
+    assert async_names == sync_names
+    assert sync_names == ["BrowseFolderEntry", "RemoteFileEntry", "RemoteFileEntry"]
+    assert async_params == sync_params
+    assert [params["offset"] for params in sync_params] == ["0", "2"]

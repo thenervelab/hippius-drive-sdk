@@ -349,7 +349,8 @@ class RequestBuilders:
             ss58: The account address.
             folder_hash: The folder to list.
             offset: Starting index into the ordered result set.
-            limit: Results per page; the server default when omitted.
+            limit: Results per page; the server defaults to 1000 and caps
+                it at 5000.
 
         Returns:
             The request.
@@ -375,7 +376,8 @@ class RequestBuilders:
             folder_hash: The folder to browse.
             options: Path, sort, and filter options.
             offset: Starting index into the combined folders-then-files stream.
-            limit: Results per page.
+            limit: Results per page; the server defaults to 50 and coerces
+                anything above 200 down to 200.
 
         Returns:
             The request.
@@ -409,7 +411,8 @@ class RequestBuilders:
             ss58: The account address.
             filters: The filter and sort set; all-AND.
             offset: Starting index into the result set.
-            limit: Results per page; the server defaults to 25.
+            limit: Results per page; the server defaults to 25 and coerces
+                anything above 200 down to 200.
             folder_hash: Set for a shared-drive member, so the server scopes
                 the search to that drive.
 

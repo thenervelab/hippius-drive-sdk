@@ -110,12 +110,21 @@ from hippius_drive import SearchFilters
 for entry in client.files.iter_state():  # pages until the server stops
     print(entry.relative_path, entry.size_bytes)
 
-listing = client.files.browse("work")  # one directory level
+listing = client.files.browse("work")  # one page of one directory level
 for folder in listing.folders:
     print(folder.name, folder.total_bytes)  # recursive totals
 
+for entry in client.files.iter_browse("work"):  # the whole level, every page
+    print(entry)
+
 hits = client.files.search(SearchFilters(q="report", file_type=["pdf"]))
 ```
+
+`browse` and `search` are paged by the server: at most 200 entries per request,
+and 50 (`browse`) or 25 (`search`) when you pass no `limit`. A larger `limit`
+is reduced to 200, not rejected, so continue from `offset + entries returned`
+while `has_more` is true. `iter_browse` does that for you. A search `q` shorter
+than 3 characters returns no hits by server policy: an empty page, not an error.
 
 `browse` and `search` only see files that carry a plaintext `relative_path`.
 Rows written before that field existed are visible in `state()` and in sync, but

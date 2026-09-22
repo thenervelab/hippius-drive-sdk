@@ -63,6 +63,24 @@ def test_search_accepts_a_plain_string_file_type() -> None:
     assert params(r)["file_type"] == "image"
 
 
+def test_browse_omits_the_limit_unless_the_caller_names_one() -> None:
+    # No limit on the wire means the server default, which is 50 for /browse.
+    # Whole-directory callers go through iter_browse, which always names one.
+    assert "limit" not in params(build.browse("5G", "abc", offset=50))
+
+
+def test_listing_limits_go_out_unclamped() -> None:
+    # The server coerces an over-cap limit; the builder does not second-guess
+    # it, so a future raise of the cap needs no SDK release.
+    assert params(build.browse("5G", "abc", limit=1000))["limit"] == 1000
+    assert params(build.search_files("5G", limit=1000))["limit"] == 1000
+
+
+def test_search_pages_by_offset() -> None:
+    r = build.search_files("5G", SearchFilters(q="report"), offset=200, limit=200)
+    assert r.params == {"q": "report", "offset": 200, "limit": 200}
+
+
 def test_search_with_no_filters_only_pages() -> None:
     assert build.search_files("5G").params == {"offset": 0}
 
