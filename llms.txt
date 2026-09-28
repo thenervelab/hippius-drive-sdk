@@ -1,0 +1,54 @@
+# hippius-drive
+
+> Python SDK and CLI for Hippius Drive. Files are encrypted on the machine that holds the recovery phrase. The server stores ciphertext.
+
+Part of the Hippius docs for agents. Start at https://docs.hippius.com/llms.txt
+
+## What it is and what it does
+
+A scriptable client for the same Drive a person sees in the console, the desktop app, and the Android app. It is alpha. The sync engine and recovery bindings are not in this version.
+
+Drive is not S3. A file put through this SDK does not appear in an S3 bucket.
+
+## How to install
+
+The README says `pip install hippius-drive`. That name is not on PyPI. Install from this repository:
+
+```bash
+pip install "git+https://github.com/thenervelab/hippius-drive-sdk"
+```
+
+Python 3.10 to 3.13.
+
+## How to sign in
+
+The caller needs three things that belong together:
+
+- An API token from https://console.hippius.com/dashboard/settings
+- The account address that token belongs to
+- The recovery phrase for the Drive
+
+The phrase never leaves the user's machine. Do not ask them to paste it into chat. Read it from their environment if they have already stored it there.
+
+```python
+from pathlib import Path
+from hippius_drive import Client, Identity
+
+identity = Identity.from_master(master_phrase, "default", account_ss58=account)
+with Client(token=token, identity=identity) as client:
+    client.folders.register()
+    client.files.put(Path("report.pdf"), "work/report.pdf")
+```
+
+A token and an address that do not belong together fail the first request with 403.
+
+Paying and plans: https://docs.hippius.com/use/console/billing
+What the console Drive UI does: https://docs.hippius.com/use/console/drive
+
+## Links
+
+- Documentation home: https://docs.hippius.com
+- Console Drive: https://docs.hippius.com/use/console/drive
+- Desktop Drive: https://docs.hippius.com/use/desktop/drive
+- Billing: https://docs.hippius.com/use/console/billing
+- This repository's README: https://github.com/thenervelab/hippius-drive-sdk/blob/main/README.md
