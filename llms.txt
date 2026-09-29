@@ -51,4 +51,4 @@ What the console Drive UI does: https://docs.hippius.com/use/console/drive
 - Console Drive: https://docs.hippius.com/use/console/drive
 - Desktop Drive: https://docs.hippius.com/use/desktop/drive
 - Billing: https://docs.hippius.com/use/console/billing
-- This repository's README: https://github.com/thenervelab/hippius-drive-sdk/blob/main/README.md
+- This repository's README: https://raw.githubusercontent.com/thenervelab/hippius-drive-sdk/main/README.md
