@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling==1.32.0"]
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [project]
@@ -15,9 +15,9 @@ keywords = ["hippius", "hcfs", "storage", "encryption", "e2ee"]
 dependencies = [
   "httpx==0.28.1",
   "pynacl==1.6.2",
-  "blake3==1.0.9",
+  "blake3==1.0.10",
   "mnemonic==0.21",
-  "cryptography==50.0.1",
+  "cryptography==50.0.2",
   "argon2-cffi==25.1.0",
   "pydantic==2.13.5",
   "click==8.5.0",
@@ -45,10 +45,10 @@ Issues = "https://github.com/thenervelab/hippius-drive-sdk/issues"
 [dependency-groups]
 dev = [
   "pytest==9.1.1",
-  "hypothesis==6.168.0",
+  "hypothesis==6.168.5",
   "respx==0.23.1",
-  "ruff==0.16.7",
-  "ty==0.0.80",
+  "ruff==0.16.10",
+  "ty==0.0.84",
   "pip-audit==2.10.1",
   "pytest-cov==7.1.0",
   "anyio==4.15.1",
