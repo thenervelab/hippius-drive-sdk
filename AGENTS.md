@@ -205,7 +205,7 @@ hippius-drive rm work/a.pdf
 hippius-drive share put report.pdf --name report.pdf
 hippius-drive folder-share put --prefix work --name Work
 hippius-drive invite put --role writer --days 7
-hippius-drive invite accept URL
+hippius-drive drives join --invite-file F   # or HIPPIUS_INVITE_URL; never the URL in argv
 hippius-drive drives
 hippius-drive drives leave OWNER_SS58 FOLDER_HASH
 ```

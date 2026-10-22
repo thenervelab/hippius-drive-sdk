@@ -63,6 +63,8 @@ def env(mnemonic_file: Path) -> dict[str, str]:
         "HIPPIUS_SERVER_URL": BASE,
         "HIPPIUS_MNEMONIC_FILE": str(mnemonic_file),
         "HIPPIUS_PASSWORD": PASSWORD,
+        # Blank, so an invite exported in the shell running the tests is ignored.
+        "HIPPIUS_INVITE_URL": "",
     }
 
 
@@ -1473,3 +1475,141 @@ def test_a_secret_typed_as_the_file_name_is_not_echoed(config_path: Path) -> Non
     assert result.exit_code != 0
     assert "cannot read the given path" in result.output
     assert "abandon" not in result.output
+
+
+def _mock_join(monkeypatch: pytest.MonkeyPatch, path_prefix: str | None = None) -> str:
+    monkeypatch.setattr(_links, "accept_grant", lambda *_args: "e30=")
+    url = grant.invite_url(CONSOLE, "joinme", kdf.folder_entropy(MASTER, "default"))
+    meta: dict[str, Any] = {"owner_ss58": OWNER, "folder_hash": FOLDER}
+    accepted: dict[str, Any] = {"owner_ss58": OWNER, "folder_hash": FOLDER, "role": "writer"}
+    if path_prefix:
+        meta["path_prefix"] = accepted["path_prefix"] = path_prefix
+    respx.get(f"{BASE}/v1/drive-invites/joinme/meta").mock(
+        return_value=httpx.Response(200, json=meta)
+    )
+    respx.post(f"{BASE}/v1/drive-invites/joinme/accept").mock(
+        return_value=httpx.Response(200, json=accepted)
+    )
+    return url
+
+
+def _invite_file(tmp_path: Path, url: str, mode: int = 0o600) -> Path:
+    path = tmp_path / "invite.txt"
+    path.write_text(url + "\n")
+    path.chmod(mode)
+    return path
+
+
+@respx.mock
+def test_drives_join_reads_the_invite_from_a_file(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = _mock_join(monkeypatch)
+    result = run(["drives", "join", "--invite-file", str(_invite_file(tmp_path, url))], env)
+    assert result.exit_code == 0, result.output
+    assert f"owner        {OWNER}" in result.output
+    assert "role         writer" in result.output
+    assert url.split("#")[1][2:] not in result.output
+
+
+@respx.mock
+def test_drives_join_reads_stdin_and_emits_json(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = _mock_join(monkeypatch, path_prefix="Work")
+    result = CliRunner().invoke(
+        main, ["drives", "join", "--invite-file", "-", "--json"], input=url, env=env
+    )
+    assert result.exit_code == 0, result.output
+    row = json.loads(result.output)
+    assert row == {
+        "owner_ss58": OWNER,
+        "folder_hash": FOLDER,
+        "role": "writer",
+        "path_prefix": "Work",
+        "already_owner": False,
+    }
+
+
+@respx.mock
+def test_drives_join_reads_the_environment(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = _mock_join(monkeypatch)
+    result = run(["drives", "join"], {**env, "HIPPIUS_INVITE_URL": url})
+    assert result.exit_code == 0, result.output
+
+
+def test_drives_join_needs_exactly_one_invite_source(env: dict[str, str], tmp_path: Path) -> None:
+    missing = run(["drives", "join"], env)
+    assert missing.exit_code != 0
+    assert "--invite-file" in missing.output
+    path = _invite_file(tmp_path, "https://x.io/invite/t#k=" + "A" * 43)
+    both = run(["drives", "join", "--invite-file", str(path)], {**env, "HIPPIUS_INVITE_URL": "x"})
+    assert both.exit_code != 0
+    assert "once" in both.output
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_drives_join_refuses_an_invite_file_others_can_read(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    path = _invite_file(tmp_path, "https://x.io/invite/t#k=" + "A" * 43, mode=0o644)
+    result = run(["drives", "join", "--invite-file", str(path)], env)
+    assert result.exit_code != 0
+    assert "chmod 600" in result.output
+
+
+@respx.mock
+def test_invite_accept_takes_an_invite_file_too(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = _mock_join(monkeypatch)
+    path = _invite_file(tmp_path, url)
+    result = run(["invite", "accept", "--invite-file", str(path)], env)
+    assert result.exit_code == 0, result.output
+    assert "folder_hash" in result.output
+
+
+def test_drives_join_refuses_a_url_argument_without_echoing_it(env: dict[str, str]) -> None:
+    secret = "B" * 43
+    result = run(["drives", "join", f"https://x.io/invite/t#i={secret}"], env)
+    assert result.exit_code != 0
+    assert "no URL argument" in result.output
+    assert secret not in result.output
+
+
+@respx.mock
+def test_a_blank_invite_environment_is_not_a_source(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = _mock_join(monkeypatch)
+    path = _invite_file(tmp_path, url)
+    result = run(
+        ["drives", "join", "--invite-file", str(path)], {**env, "HIPPIUS_INVITE_URL": "  "}
+    )
+    assert result.exit_code == 0, result.output
+    blank = run(["drives", "join"], {**env, "HIPPIUS_INVITE_URL": " \n"})
+    assert blank.exit_code != 0
+    assert "once" in blank.output
+
+
+@respx.mock
+def test_a_dead_link_secret_invite_errors_without_its_secret(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    secret = invite_link.derive_link_secret(bytes(32), invite_link.invite_id_for_token("deadtok"))
+    fragment = base64.urlsafe_b64encode(secret).rstrip(b"=").decode()
+    respx.get(f"{BASE}/v1/drive-invites/deadtok/meta").mock(return_value=httpx.Response(404))
+    path = _invite_file(tmp_path, f"{CONSOLE}/invite/deadtok#i={fragment}")
+    result = run(["drives", "join", "--invite-file", str(path)], env)
+    assert result.exit_code == 1
+    assert fragment not in result.output
+    assert "Traceback" not in result.output
+
+
+def test_an_invite_url_given_as_the_file_is_not_echoed(env: dict[str, str]) -> None:
+    secret = "C" * 43
+    result = run(["drives", "join", "--invite-file", f"https://x.io/invite/t#i={secret}"], env)
+    assert result.exit_code != 0
+    assert secret not in result.output

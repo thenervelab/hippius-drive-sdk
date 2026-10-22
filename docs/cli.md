@@ -188,12 +188,20 @@ File-share `ls` prints the plaintext token. Folder-share `ls` prints
 ```bash
 hippius-drive invite put                         # writer, server-default lifetime
 hippius-drive invite put --role reader --days 7
-hippius-drive invite accept 'https://console.hippius.com/invite/TOKEN#i=...'   # or #k=
+hippius-drive drives join --invite-file ~/.secrets/invite.txt   # or - for stdin
+HIPPIUS_INVITE_URL="$(cat invite.txt)" hippius-drive drives join --json
+hippius-drive invite accept --invite-file invite.txt             # the same command
 
 hippius-drive drives
 hippius-drive drives --json
 hippius-drive drives leave OWNER_SS58 FOLDER_HASH
 ```
+
+`drives join` (and `invite accept`) reads the invite from an owner-only file,
+stdin, or `HIPPIUS_INVITE_URL`, exactly one of them. `invite accept URL` still
+takes the URL as an argument, but that puts the link's key in shell history and
+`ps`; use the file. The output names the owner, drive, role, and folder; the
+invite's key is never printed.
 
 `invite put` prints the invite URL and performs the seal-back itself. It does
 not print the folder phrase. On a server that opens link-secret invites (all of
