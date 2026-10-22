@@ -13,6 +13,7 @@ path once read an error body with the sync `read()`, which turned every async
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -23,11 +24,11 @@ import pytest
 import respx
 from nacl.signing import VerifyKey
 
-from hippius_drive import FileShareSpec, InviteSpec, errors
+from hippius_drive import FileShareSpec, InviteSpec, _links, errors
 from hippius_drive._transport import AsyncTransport, Transport
 from hippius_drive._upload import TRANSPORT_CHUNK
 from hippius_drive.client import AsyncClient, Client
-from hippius_drive.crypto import file_cipher, kdf
+from hippius_drive.crypto import file_cipher, invite_link, kdf
 from hippius_drive.identity import Identity, tos_text
 from hippius_drive.models import BrowseOptions, RenameSpec, SearchFilters
 from tests.helpers import manifest_from, multipart_parts
@@ -416,3 +417,63 @@ async def test_both_clients_page_iter_browse_identically(identity: Identity) -> 
     assert sync_names == ["BrowseFolderEntry", "RemoteFileEntry", "RemoteFileEntry"]
     assert async_params == sync_params
     assert [params["offset"] for params in sync_params] == ["0", "2"]
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_link_secret_accept_agrees_across_clients(
+    identity: Identity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The grant seal is Argon2id with a random salt; a fixed stand-in keeps
+    # the accept bodies comparable without hiding anything else on the wire.
+    monkeypatch.setattr(_links, "accept_grant", lambda *_args: "c2VhbGVk")
+    token = "inviteTok"
+    entropy = kdf.folder_entropy(MASTER, "default")
+    secret = invite_link.derive_link_secret(entropy, invite_link.invite_id_for_token(token))
+    envelope = invite_link.seal_envelope(secret, entropy, invite_link.InviteLinkKind.DRIVE)
+    respx.get(f"{BASE}/v1/drive-invites/{token}/meta").mock(
+        return_value=httpx.Response(200, json={"owner_ss58": SS58, "folder_hash": FOLDER})
+    )
+    respx.get(f"{BASE}/v1/drive-invites/{token}/link-key").mock(
+        return_value=httpx.Response(
+            200, json={"envelope": base64.b64encode(envelope).decode(), "kind": "drive"}
+        )
+    )
+    respx.post(f"{BASE}/v1/drive-invites/{token}/accept").mock(
+        return_value=httpx.Response(
+            200, json={"owner_ss58": SS58, "folder_hash": FOLDER, "role": "writer"}
+        )
+    )
+    fragment = base64.urlsafe_b64encode(secret).rstrip(b"=").decode()
+    url = f"https://console.hippius.com/invite/{token}#i={fragment}"
+
+    def wire(start: int) -> list[tuple[str, str, str | None, str | None, bytes]]:
+        return [
+            (
+                call.request.method,
+                call.request.url.path,
+                call.request.headers.get("Authorization"),
+                call.request.headers.get("x-hcfs-link-proof"),
+                call.request.content,
+            )
+            for call in respx.calls[start:]
+        ]
+
+    with Client(token="tok", identity=identity, transport=Transport(BASE, "tok")) as client:
+        sync_accepted = client.drives.accept(url, MASTER, member_ss58=SS58)
+    sync_wire = wire(0)
+
+    async with AsyncClient(
+        token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
+    ) as aclient:
+        async_accepted = await aclient.drives.accept(url, MASTER, member_ss58=SS58)
+
+    assert wire(len(sync_wire)) == sync_wire
+    assert [step[:2] for step in sync_wire] == [
+        ("GET", f"/v1/drive-invites/{token}/meta"),
+        ("GET", f"/v1/drive-invites/{token}/link-key"),
+        ("POST", f"/v1/drive-invites/{token}/accept"),
+    ]
+    assert sync_wire[0][2] is None
+    assert sync_wire[1][3] == invite_link.fetch_proof(secret)
+    assert async_accepted.folder_mnemonic == sync_accepted.folder_mnemonic

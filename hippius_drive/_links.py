@@ -373,8 +373,9 @@ def open_link_key(fragment: InviteFragment, meta: InviteMeta, found: InviteLinkK
         The 32-byte key the envelope sealed.
 
     Raises:
-        InvalidResponse: If the server's ``kind`` disagrees with the preview.
-        DecryptError: If the envelope is malformed or does not open.
+        InvalidResponse: If the server's ``kind`` disagrees with the preview,
+            or the envelope is not base64.
+        DecryptError: If the envelope has the wrong shape or does not open.
     """
     expected = InviteLinkKind.FOLDER if meta.path_prefix else InviteLinkKind.DRIVE
     if found.kind != expected.value:
@@ -384,7 +385,7 @@ def open_link_key(fragment: InviteFragment, meta: InviteMeta, found: InviteLinkK
     try:
         envelope = base64.b64decode(found.envelope, validate=True)
     except ValueError as exc:
-        raise DecryptError("invite link envelope is not standard base64") from exc
+        raise errors.InvalidResponse("invite link envelope is not standard base64") from exc
     return invite_link.open_envelope(fragment.material, envelope, expected)
 
 

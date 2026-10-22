@@ -137,6 +137,17 @@ def test_parse_refuses_anything_else() -> None:
         parse_invite_link("https://x.io/invite/tok#i=A")
 
 
+def test_parse_takes_only_canonical_unpadded_base64url() -> None:
+    material = bytes([0xFB]) * 32
+    canonical = base64.urlsafe_b64encode(material).rstrip(b"=").decode()
+    assert "-" in canonical or "_" in canonical
+    assert parse_invite_link(f"https://x.io/invite/tok#i={canonical}").material == material
+    standard = base64.b64encode(material).rstrip(b"=").decode()
+    for fragment in (f"{canonical}=", standard, canonical[:-1] + "B"):
+        with pytest.raises(ValueError, match="unpadded base64url"):
+            parse_invite_link(f"https://x.io/invite/tok#i={fragment}")
+
+
 def test_the_legacy_parser_points_a_link_secret_elsewhere() -> None:
     fragment = base64.urlsafe_b64encode(_secret()).rstrip(b"=").decode()
     with pytest.raises(ValueError, match="#k="):

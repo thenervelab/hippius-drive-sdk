@@ -13,10 +13,17 @@ import respx
 from hippius_drive import _links
 from hippius_drive._links import DEFAULT_CONSOLE, InviteSpec
 from hippius_drive._transport import AsyncTransport, Transport
+from hippius_drive._wire import build
 from hippius_drive.client import AsyncClient, Client
 from hippius_drive.crypto import invite_link, kdf
 from hippius_drive.crypto.invite_link import InviteLinkKind
-from hippius_drive.errors import DecryptError, InvalidResponse, NotFound
+from hippius_drive.errors import (
+    DecryptError,
+    Forbidden,
+    InvalidResponse,
+    MemberLimitReached,
+    NotFound,
+)
 from hippius_drive.identity import Identity
 
 BASE = "https://example.test"
@@ -207,15 +214,36 @@ def test_an_envelope_sealed_as_a_folder_does_not_open_as_a_drive(client: Client)
 
 
 @respx.mock
-def test_an_envelope_that_is_not_base64_is_a_decrypt_error(client: Client) -> None:
+def test_an_envelope_that_is_not_base64_is_an_invalid_response(client: Client) -> None:
     respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/meta").mock(
         return_value=httpx.Response(200, json={"owner_ss58": SS58, "folder_hash": FOLDER})
     )
     respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/link-key").mock(
         return_value=httpx.Response(200, json={"envelope": "***", "kind": "drive"})
     )
-    with pytest.raises(DecryptError, match="base64"):
+    with pytest.raises(InvalidResponse, match="base64"):
         client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+
+
+@respx.mock
+def test_a_full_drive_is_a_retryable_member_limit_not_a_forbidden(client: Client) -> None:
+    respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/meta").mock(
+        return_value=httpx.Response(200, json={"owner_ss58": SS58, "folder_hash": FOLDER})
+    )
+    body = {"error": "drive_member_limit_reached", "message": "full", "member_limit": 3}
+    respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/link-key").mock(
+        return_value=httpx.Response(403, json=body)
+    )
+    with pytest.raises(MemberLimitReached) as caught:
+        client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+    assert caught.value.member_limit == 3
+    assert caught.value.retryable is True
+    assert isinstance(caught.value, Forbidden)
+
+
+def test_the_link_proof_stays_out_of_the_request_repr() -> None:
+    proof = invite_link.fetch_proof(_link_secret())
+    assert proof not in repr(build.invite_link_key(TOKEN, proof))
 
 
 @respx.mock

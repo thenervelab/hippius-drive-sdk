@@ -149,6 +149,7 @@ is `ValueError`, raised locally.
 |---|---|
 | `Unauthorized` | 401 — token missing, malformed, or rejected |
 | `Forbidden` | 403 — token resolves to a different account than the request names |
+| `MemberLimitReached` | 403 `drive_member_limit_reached` — a `Forbidden` subclass; the drive is full, the invite stays live, retry later. Carries `member_limit` |
 | `QuotaExceeded` | 402 — over plan/credits; may carry `balance_cents` / `required_cents` |
 | `NotFound` | 404 — no such file, folder, share, or session. An empty 404 is still `NotFound` |
 | `Gone` | 410 — invite revoked, expired, or exhausted |

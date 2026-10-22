@@ -105,6 +105,10 @@ def parse_invite_link(url: str) -> InviteFragment:
         raise ValueError("invite fragment is not base64url") from exc
     if len(material) != _KEY_LEN:
         raise ValueError(f"invite fragment must be {_KEY_LEN} bytes, got {len(material)}")
+    # hcfs decodes with URL_SAFE_NO_PAD: no padding, no "+" or "/", no
+    # stray trailing bits. Only the canonical encoding round-trips.
+    if base64.urlsafe_b64encode(material).rstrip(b"=").decode() != raw:
+        raise ValueError("invite fragment is not unpadded base64url")
     return InviteFragment(unquote(segments[1]), form, material)
 
 

@@ -13,6 +13,7 @@ from hippius_drive.errors import Forbidden as Forbidden
 from hippius_drive.errors import Gone as Gone
 from hippius_drive.errors import InvalidRequest as InvalidRequest
 from hippius_drive.errors import InvalidResponse as InvalidResponse
+from hippius_drive.errors import MemberLimitReached as MemberLimitReached
 from hippius_drive.errors import NotFound as NotFound
 from hippius_drive.errors import PayloadTooLarge as PayloadTooLarge
 from hippius_drive.errors import QuotaExceeded as QuotaExceeded
@@ -49,6 +50,7 @@ __all__ = [
     "InvalidRequest",
     "InvalidResponse",
     "InviteSpec",
+    "MemberLimitReached",
     "NotFound",
     "PayloadTooLarge",
     "QuotaExceeded",
