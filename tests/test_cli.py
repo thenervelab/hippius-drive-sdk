@@ -1466,3 +1466,10 @@ def test_a_token_file_login_drops_a_stale_config_token(tmp_path: Path, config_pa
     assert result.exit_code == 0, result.output
     cfg = _config.load({}, environ={}, config_path=config_path)
     assert (cfg.token, cfg.account_ss58) == (None, ACCESS_SS58)
+
+
+def test_a_secret_typed_as_the_file_name_is_not_echoed(config_path: Path) -> None:
+    result = run(["auth", "login", "--phrase-file", ACCESS_KEY, "--api", API], {})
+    assert result.exit_code != 0
+    assert "cannot read the given path" in result.output
+    assert "abandon" not in result.output

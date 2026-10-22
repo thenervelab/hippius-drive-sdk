@@ -131,7 +131,10 @@ def _read_secret(path: Path) -> str:
     try:
         fd = os.open(path, flags)
     except OSError as exc:
-        raise click.ClickException(f"cannot read {path}: {exc.strerror}") from exc
+        # A path that is not there may be the secret itself, typed where the
+        # file name belongs; only an existing path is named in the error.
+        shown = str(path) if os.path.lexists(path) else "the given path"
+        raise click.ClickException(f"cannot read {shown}: {exc.strerror}") from exc
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode):
         os.close(fd)
@@ -159,9 +162,11 @@ def _write_secret(path: Path, value: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(value + "\n")
         os.replace(tmp, path)
-    except OSError as exc:
+    except BaseException as exc:
         Path(tmp).unlink(missing_ok=True)
-        raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
+        if isinstance(exc, OSError):
+            raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
+        raise
 
 
 def _prompt_password() -> str:
