@@ -104,6 +104,11 @@ remain `ls` prints the `--offset` that continues the listing. Note that
 files with no stored plaintext path do not appear in `ls` — use `ls --all`,
 which lists everything.
 
+On a shared drive, each file line ends with who added it: `(by NAME)`, or
+`(by SS58)` when the uploader's account has no display name. Files that
+predate attribution have no suffix. `--json` carries `uploaded_by`,
+`uploaded_by_name`, and `uploaded_by_email` as the server sent them.
+
 ## Search and quota
 
 ```bash
