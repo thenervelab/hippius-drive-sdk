@@ -1416,7 +1416,7 @@ def test_a_secret_from_a_terminal_is_prompted_without_echo(monkeypatch: pytest.M
 
 def test_a_secret_must_come_from_a_regular_file(tmp_path: Path) -> None:
     # POSIX opens a directory and fstat refuses it; Windows refuses the open.
-    with pytest.raises(click.ClickException, match="not a regular file|cannot read"):
+    with pytest.raises(click.ClickException, match=r"not a regular file|cannot read"):
         cli._read_secret(tmp_path)
 
 
