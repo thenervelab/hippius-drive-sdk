@@ -295,6 +295,26 @@ def test_an_owner_opening_their_own_folder_invite_gets_the_echo_too(
     assert client.drives.accept(url, MASTER, member_ss58=SS58).already_owner is True
 
 
+@respx.mock
+def test_an_owner_accept_without_the_echo_is_refused_too(
+    client: Client, quick_grant: list[str]
+) -> None:
+    respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/meta").mock(
+        return_value=httpx.Response(
+            200, json={"owner_ss58": SS58, "folder_hash": FOLDER, "path_prefix": "Work"}
+        )
+    )
+    respx.post(f"{BASE}/v1/drive-invites/{TOKEN}/accept").mock(
+        return_value=httpx.Response(
+            200,
+            json={"owner_ss58": SS58, "folder_hash": FOLDER, "already_owner": True},
+        )
+    )
+    url = grant.invite_url(DEFAULT_CONSOLE, TOKEN, FILE_KEY)
+    with pytest.raises(InvalidResponse, match="echo"):
+        client.drives.accept(url, MASTER, member_ss58=SS58)
+
+
 def test_a_folder_grant_identity_is_never_a_manager() -> None:
     phrase = grant.phrase_from_entropy(FILE_KEY)
     with pytest.raises(ValueError, match="reader or writer"):

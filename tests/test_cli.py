@@ -2,6 +2,7 @@ import ast
 import base64
 import json
 from pathlib import Path
+from typing import Any
 
 import blake3
 import httpx
@@ -1036,6 +1037,44 @@ def test_drives_lists_memberships_without_the_phrase(env: dict[str, str]) -> Non
     assert rows[0]["path_prefix"] is None
     assert rows[1]["path_prefix"] == "Clients/ACME"
     assert "folder_mnemonic" not in rows[0]
+
+
+@respx.mock
+def test_drives_leave_works_on_a_folder_grant(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[str] = []
+    real = Identity.for_folder_grant
+
+    def spy(*args: Any, **kwargs: Any) -> Identity:
+        built.append(kwargs["folder_hash"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(Identity, "for_folder_grant", spy)
+    file_key_phrase = grant.phrase_from_entropy(bytes([0x44]) * 32)
+    monkeypatch.setattr(_links, "_open_one_grant", lambda *_args: file_key_phrase)
+    respx.get(f"{BASE}/v1/drive-memberships").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "folder_grants": [
+                    {
+                        "owner_ss58": OWNER,
+                        "folder_hash": FOLDER,
+                        "path_prefix": "Work",
+                        "grant_blob": "sealed",
+                    }
+                ]
+            },
+        )
+    )
+    route = respx.delete(f"{BASE}/v1/drives/{FOLDER}/members/{SS58}").mock(
+        return_value=httpx.Response(204)
+    )
+    result = run(["drives", "leave", OWNER, FOLDER], env)
+    assert result.exit_code == 0, result.output
+    assert built == [FOLDER]
+    assert route.calls.last.request.url.params["owner"] == OWNER
 
 
 @respx.mock
