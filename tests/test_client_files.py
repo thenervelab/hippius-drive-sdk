@@ -587,3 +587,28 @@ def test_make_dirs_refuses_a_bare_string_and_server_path_rules(client: Client) -
     for bad in ["a\u200bb", "a\tb", "/".join(["d"] * 65), "x" * 256, "a/" + "y" * 1023]:
         with pytest.raises(ValueError, match="relative_path"):
             client.folders.make_dirs([bad])
+
+
+@respx.mock
+def test_lookup_prefers_the_exact_id_over_a_same_path_row(client: Client) -> None:
+    nfc_path = "Caf\u00e9/a.txt"
+    desktop_row = {**LOOKUP_FILE, "path_hash": [4] * 32, "relative_path": nfc_path}
+    exact = {
+        **LOOKUP_FILE,
+        "path_hash": list(hashes.path_hash(nfc_path)),
+        "relative_path": nfc_path,
+    }
+    route = respx.get(url__regex=r".*/browse/.*").mock(return_value=_page([desktop_row, exact]))
+    found = client.files.lookup(nfc_path)
+    assert found is not None
+    assert found.file_id == hashes.path_hash(nfc_path).hex()
+    assert route.calls.last.request.url.params["path"] == "Caf\u00e9"
+
+
+@respx.mock
+def test_lookup_falls_back_to_a_same_path_row(client: Client) -> None:
+    nfd_row = {**LOOKUP_FILE, "path_hash": [4] * 32, "relative_path": "cafe\u0301.txt"}
+    respx.get(url__regex=r".*/browse/.*").mock(return_value=_page([nfd_row]))
+    found = client.files.lookup("caf\u00e9.txt")
+    assert found is not None
+    assert found.file_id == "04" * 32

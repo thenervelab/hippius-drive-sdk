@@ -353,12 +353,13 @@ class FileOps:
             ValueError: If ``relative_path`` is not a clean relative path.
         """
         wanted = self.file_id(relative_path)
-        for entry in self.iter_browse(_parent_dir(relative_path)):
-            if isinstance(entry, models.RemoteFileEntry) and _same_file(
-                entry, wanted, relative_path
-            ):
-                return entry
-        return None
+        found = [
+            entry
+            for entry in self.iter_browse(_parent_dir(relative_path))
+            if isinstance(entry, models.RemoteFileEntry)
+            and _same_file(entry, wanted, relative_path)
+        ]
+        return _best_match(found, wanted)
 
     def iter_browse(
         self,
@@ -880,12 +881,13 @@ class AsyncFileOps:
     async def lookup(self, relative_path: str) -> models.RemoteFileEntry | None:
         """Async twin of :meth:`FileOps.lookup`."""
         wanted = self.file_id(relative_path)
-        async for entry in self.iter_browse(_parent_dir(relative_path)):
-            if isinstance(entry, models.RemoteFileEntry) and _same_file(
-                entry, wanted, relative_path
-            ):
-                return entry
-        return None
+        found = [
+            entry
+            async for entry in self.iter_browse(_parent_dir(relative_path))
+            if isinstance(entry, models.RemoteFileEntry)
+            and _same_file(entry, wanted, relative_path)
+        ]
+        return _best_match(found, wanted)
 
     async def iter_browse(
         self,
@@ -1204,9 +1206,19 @@ class AsyncClient:
 
 
 def _parent_dir(relative_path: str) -> str:
-    """The directory a file's listing lives in; "" for the folder root."""
-    normalized = hashes.normalize_relative_path(relative_path)
-    return normalized.rpartition("/")[0]
+    """The directory a file's listing lives in; "" for the folder root.
+
+    NFC is enough: hcfs stores ``relative_path`` only in NFC (its path
+    validator refuses anything else), so a desktop row from an NFD name
+    differs in ``path_hash``, never in the listed path or its directory.
+    """
+    return hashes.normalize_relative_path(relative_path).rpartition("/")[0]
+
+
+def _best_match(found: list[models.RemoteFileEntry], wanted: str) -> models.RemoteFileEntry | None:
+    """The exact-id row when there is one, else the first same-path row."""
+    exact = [entry for entry in found if entry.file_id == wanted]
+    return (exact or found or [None])[0]
 
 
 def _same_file(entry: models.RemoteFileEntry, wanted: str, relative_path: str) -> bool:

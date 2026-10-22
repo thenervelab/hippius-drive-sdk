@@ -1387,3 +1387,15 @@ def test_mkdir_registers_the_named_directories(env: dict[str, str]) -> None:
 def test_mkdir_refuses_a_bad_path(env: dict[str, str]) -> None:
     result = run(["mkdir", "../escape"], env)
     assert result.exit_code == 1
+
+
+@respx.mock
+def test_a_409_about_an_upload_session_is_reported_as_is(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    body = {"Error": {"error": "session_exists", "message": "an upload is already running"}}
+    respx.post(f"{BASE}/upload").mock(return_value=httpx.Response(409, json=body))
+    result = run(["put", str(_local(tmp_path)), "a.bin"], env)
+    assert result.exit_code == 3
+    assert "session_exists" in result.output
+    assert "moved or deleted" not in result.output
