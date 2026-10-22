@@ -12,10 +12,9 @@ Drive is not S3. A file put through this SDK does not appear in an S3 bucket.
 
 ## How to install
 
-The README says `pip install hippius-drive`. That name is not on PyPI. Install from this repository:
-
 ```bash
-pip install "git+https://github.com/thenervelab/hippius-drive-sdk"
+pip install hippius-drive            # file storage, shares, shared drives
+pip install 'hippius-drive[login]'   # plus access-key sign-in without a browser
 ```
 
 Python 3.10 to 3.13.

@@ -86,6 +86,20 @@ jobs:
           echo "--- wheel ---"
           uv run python -c 'import glob, zipfile; print(chr(10).join(sorted(zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist())))'
 
+      # The wheel the tests never imported: install it alone in a clean
+      # environment, with and without the login extra, and run the command.
+      - name: Smoke-test the built wheel
+        run: |
+          set -euo pipefail
+          wheel="$(ls dist/*.whl)"
+          uv venv --python 3.13 /tmp/smoke-core
+          uv pip install --python /tmp/smoke-core "$wheel"
+          /tmp/smoke-core/bin/hippius-drive --version
+          /tmp/smoke-core/bin/python -c 'import hippius_drive, hippius_drive.auth; print(hippius_drive.__version__)'
+          uv venv --python 3.13 /tmp/smoke-login
+          uv pip install --python /tmp/smoke-login "${wheel}[login]"
+          /tmp/smoke-login/bin/python -c 'from hippius_drive.crypto import wallet; print(wallet.wallet_keys(" ".join(["abandon"] * 11 + ["about"])).ss58_address)'
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
