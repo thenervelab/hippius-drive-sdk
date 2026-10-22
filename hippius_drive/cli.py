@@ -379,23 +379,59 @@ def put(
     base = bytes.fromhex(base_revision) if base_revision else None
     with obj.client() as client:
         if overwrite:
-            current = client.files.lookup(remote)
-            if current is not None:
-                base, revision_seq = current.revision_id, current.revision_seq + 1
-        try:
-            result = client.files.put(
-                local, remote, base_revision_id=base, revision_seq=revision_seq
-            )
-        except errors.Conflict as exc:
-            raise ConflictExit(_conflict_message(remote, replacing=base is not None)) from exc
+            result, replaced = _overwrite(client, local, remote)
+        else:
+            result, replaced = _put_once(client, local, remote, base, revision_seq), base
         file_id = client.files.file_id(remote)
     click.echo(f"file_id      {file_id}")
     click.echo(f"revision_id  {result.revision_id.hex()}")
     if overwrite:
-        click.echo(f"replaced     {'yes' if base is not None else 'no, new file'}")
+        click.echo(f"replaced     {'yes' if replaced is not None else 'no, new file'}")
 
 
-def _conflict_message(remote: str, *, replacing: bool) -> str:
+def _overwrite(client: Client, local: Path, remote: str) -> tuple[Any, bytes | None]:
+    """Replace ``remote`` by compare-and-swap; returns the result and the replaced revision.
+
+    The base is the revision the listing shows. A path whose row the listing
+    does not show (no stored path) or that someone created since answers the
+    create with a 409 naming its current revision; that revision is quoted
+    once more, still as a compare-and-swap. Anything after that is a race the
+    caller has to look at.
+    """
+    current = client.files.lookup(remote)
+    base, seq = None, None
+    if current is not None:
+        if current.file_id != client.files.file_id(remote):
+            raise click.ClickException(
+                f"{remote} was stored by the desktop app under another id (an NFD name); "
+                "replace it there, or rm it first"
+            )
+        base, seq = current.revision_id, current.revision_seq + 1
+    try:
+        return client.files.put(local, remote, base_revision_id=base, revision_seq=seq), base
+    except errors.Conflict as exc:
+        if base is not None or not _names_a_revision(exc):
+            raise ConflictExit(_conflict_message(remote, exc, replacing=base is not None)) from exc
+        base, seq = exc.current_revision_id, (exc.current_revision_seq or 0) + 1
+    return _put_once(client, local, remote, base, seq), base
+
+
+def _put_once(client: Client, local: Path, remote: str, base: bytes | None, seq: int | None) -> Any:
+    try:
+        return client.files.put(local, remote, base_revision_id=base, revision_seq=seq)
+    except errors.Conflict as exc:
+        raise ConflictExit(_conflict_message(remote, exc, replacing=base is not None)) from exc
+
+
+def _names_a_revision(exc: errors.Conflict) -> bool:
+    """True when the 409 reports a live row: a non-zero revision and its sequence."""
+    revision = exc.current_revision_id
+    return revision is not None and any(revision) and exc.current_revision_seq is not None
+
+
+def _conflict_message(remote: str, exc: errors.Conflict, *, replacing: bool) -> str:
+    if not _names_a_revision(exc):
+        return f"{remote} was moved or deleted since it was read; check before uploading again"
     if replacing:
         return f"{remote} changed since it was read; rerun to replace the newer version"
     return f"{remote} already exists; pass --overwrite to replace it"

@@ -209,7 +209,7 @@ Replacing via CLI: `put --overwrite` (compare-and-swap on the revision it
 reads; a lost race and a plain put onto an existing path both exit 3), or
 explicit `--base-revision` and `--revision-seq`. Share and
 invite commands print the URL once; that URL is the key. Failures print one
-line and exit 1 — no traceback. Full flag list: [docs/cli.md](docs/cli.md).
+line and exit 1 — no traceback (exit 3 for a `put` conflict). Full flag list: [docs/cli.md](docs/cli.md).
 
 A member client's `account_ss58` is the drive **owner**. The bearer token is
 the member's. Do not recompute `folder_hash` from a label the member chose;

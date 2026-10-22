@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import unicodedata
 from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
@@ -337,7 +338,10 @@ class FileOps:
         Walks the parent directory's listing, so it reads only that level and
         works for a folder-grant member. The entry carries the ``revision_id``
         and ``revision_seq`` a replacement must quote. A row with no plaintext
-        path does not appear in listings and reads as absent here.
+        path does not appear in listings and reads as absent here. A row the
+        desktop app created from an NFD name matches by path, but its
+        ``file_id`` then differs from :meth:`file_id`: replacing it needs that
+        row's own id, which an upload by path cannot send.
 
         Args:
             relative_path: The file's path in the folder.
@@ -350,7 +354,9 @@ class FileOps:
         """
         wanted = self.file_id(relative_path)
         for entry in self.iter_browse(_parent_dir(relative_path)):
-            if isinstance(entry, models.RemoteFileEntry) and entry.file_id == wanted:
+            if isinstance(entry, models.RemoteFileEntry) and _same_file(
+                entry, wanted, relative_path
+            ):
                 return entry
         return None
 
@@ -875,7 +881,9 @@ class AsyncFileOps:
         """Async twin of :meth:`FileOps.lookup`."""
         wanted = self.file_id(relative_path)
         async for entry in self.iter_browse(_parent_dir(relative_path)):
-            if isinstance(entry, models.RemoteFileEntry) and entry.file_id == wanted:
+            if isinstance(entry, models.RemoteFileEntry) and _same_file(
+                entry, wanted, relative_path
+            ):
                 return entry
         return None
 
@@ -1199,3 +1207,13 @@ def _parent_dir(relative_path: str) -> str:
     """The directory a file's listing lives in; "" for the folder root."""
     normalized = hashes.normalize_relative_path(relative_path)
     return normalized.rpartition("/")[0]
+
+
+def _same_file(entry: models.RemoteFileEntry, wanted: str, relative_path: str) -> bool:
+    """True for the listed file at ``relative_path``, matched by id or by path."""
+    if entry.file_id == wanted:
+        return True
+    listed = entry.relative_path
+    return listed is not None and unicodedata.normalize("NFC", listed) == (
+        hashes.normalize_relative_path(relative_path)
+    )

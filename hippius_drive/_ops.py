@@ -158,11 +158,13 @@ def register_folder_entries(
         The operation.
 
     Raises:
-        ValueError: If a path is not a clean relative path, there are none,
-            more than 500, or the caller is a reader.
+        ValueError: If a path breaks hcfs's path rules, ``paths`` is a bare
+            string, there are none or more than 500, or the caller is a reader.
     """
     identity.require_writer()
-    wanted = list(dict.fromkeys(hashes.normalize_relative_path(path) for path in paths))
+    if isinstance(paths, str):
+        raise ValueError("pass a list of directories, not one string")
+    wanted = list(dict.fromkeys(hashes.validate_stored_path(path) for path in paths))
     if not wanted:
         raise ValueError("give at least one directory")
     if len(wanted) > MAX_FOLDER_ENTRIES_BATCH:

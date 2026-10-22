@@ -579,3 +579,11 @@ LOOKUP_FILE: dict[str, object] = {
     "revision_id": [9] * 32,
     "relative_path": "work/a.bin",
 }
+
+
+def test_make_dirs_refuses_a_bare_string_and_server_path_rules(client: Client) -> None:
+    with pytest.raises(ValueError, match="list"):
+        client.folders.make_dirs("docs")
+    for bad in ["a\u200bb", "a\tb", "/".join(["d"] * 65), "x" * 256, "a/" + "y" * 1023]:
+        with pytest.raises(ValueError, match="relative_path"):
+            client.folders.make_dirs([bad])
