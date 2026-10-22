@@ -271,7 +271,7 @@ def test_an_accept_that_drops_the_folder_is_refused(client: Client, quick_grant:
 
 
 @respx.mock
-def test_an_owner_opening_their_own_folder_invite_skips_the_echo_check(
+def test_an_owner_opening_their_own_folder_invite_gets_the_echo_too(
     client: Client, quick_grant: list[str]
 ) -> None:
     respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/meta").mock(
@@ -287,6 +287,7 @@ def test_an_owner_opening_their_own_folder_invite_skips_the_echo_check(
                 "folder_hash": FOLDER,
                 "role": "writer",
                 "already_owner": True,
+                "path_prefix": "Work",
             },
         )
     )
@@ -391,4 +392,49 @@ async def test_the_async_client_accepts_a_link_secret_invite(
     assert sealed == [_phrase()]
     proof = key_route.calls.last.request.headers["x-hcfs-link-proof"]
     assert proof == invite_link.fetch_proof(_link_secret())
+    await client.aclose()
+
+
+@respx.mock
+def test_memberships_list_folder_grants_with_their_folder(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_links, "_open_one_grant", lambda _m, _s, blob: blob or None)
+    respx.get(f"{BASE}/v1/drive-memberships").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "memberships": [{"owner_ss58": SS58, "folder_hash": FOLDER, "grant_blob": "drive"}],
+                "folder_grants": [
+                    {
+                        "owner_ss58": SS58,
+                        "folder_hash": "0123456789abcdef",
+                        "path_prefix": "Clients/ACME",
+                        "grant_blob": "folder",
+                    }
+                ],
+            },
+        )
+    )
+    rows = client.drives.memberships(MASTER, member_ss58=SS58)
+    assert [(r.folder_mnemonic, r.path_prefix, r.role) for r in rows] == [
+        ("drive", None, "writer"),
+        ("folder", "Clients/ACME", "reader"),
+    ]
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_the_async_client_echoes_a_folder_invites_prefix(quick_grant: list[str]) -> None:
+    identity = Identity.from_master(MASTER, "default", account_ss58=SS58)
+    client = AsyncClient(token="tok", identity=identity, transport=AsyncTransport(BASE, "tok"))
+    folder = invite_link.seal_envelope(_link_secret(), FILE_KEY, InviteLinkKind.FOLDER)
+    _mock_link_invite(path_prefix="Work", kind="folder", envelope=folder)
+    accept = respx.post(f"{BASE}/v1/drive-invites/{TOKEN}/accept").mock(
+        return_value=_folder_accepted("Work")
+    )
+    accepted = await client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+    assert accepted.path_prefix == "Work"
+    assert json.loads(accept.calls.last.request.content)["path_prefix"] == "Work"
+    assert quick_grant == [grant.phrase_from_entropy(FILE_KEY)]
     await client.aclose()

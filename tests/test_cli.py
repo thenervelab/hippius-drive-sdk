@@ -1011,11 +1011,21 @@ def test_drives_lists_memberships_without_the_phrase(env: dict[str, str]) -> Non
                         "display_label": "Docs",
                         "frozen": True,
                     }
-                ]
+                ],
+                "folder_grants": [
+                    {
+                        "owner_ss58": OWNER,
+                        "folder_hash": "0123456789abcdef",
+                        "path_prefix": "Clients/ACME",
+                        "grant_blob": "",
+                        "display_label": "Team",
+                    }
+                ],
             },
         )
     )
     output = run(["drives"], env).output
+    assert "Team / Clients/ACME" in output
     assert "Docs" in output
     assert "frozen" in output
     assert "writer" in output
@@ -1023,6 +1033,8 @@ def test_drives_lists_memberships_without_the_phrase(env: dict[str, str]) -> Non
     rows = json.loads(run(["drives", "--json"], env).output)
     assert rows[0]["display_label"] == "Docs"
     assert rows[0]["frozen"] is True
+    assert rows[0]["path_prefix"] is None
+    assert rows[1]["path_prefix"] == "Clients/ACME"
     assert "folder_mnemonic" not in rows[0]
 
 

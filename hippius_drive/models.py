@@ -1029,14 +1029,29 @@ class DriveMembershipWire(_Wire):
     owner_name: str | None = None
 
 
+class FolderGrantWire(DriveMembershipWire):
+    """One folder of someone's drive the caller may reach, grant still sealed.
+
+    Attributes:
+        path_prefix: The granted folder.
+        role: ``reader`` or ``writer``; a folder grant is never ``manager``.
+    """
+
+    path_prefix: str
+    role: str = "reader"
+
+
 class DriveMembershipsWire(_Wire):
     """``GET /v1/drive-memberships``.
 
     Attributes:
         memberships: Drives the caller has joined.
+        folder_grants: Single folders the caller was admitted to by a folder
+            invite. Never in ``memberships``.
     """
 
     memberships: list[DriveMembershipWire] = []
+    folder_grants: list[FolderGrantWire] = []
 
 
 @dataclass(frozen=True)
@@ -1119,8 +1134,11 @@ class DriveMembership:
         folder_hash: The owner's folder id.
         role: The caller's role.
         display_label: The owner's label for the drive.
-        folder_mnemonic: Opened phrase, or None when the row has no grant.
+        folder_mnemonic: Opened phrase, or None when the row has no grant. For
+            a folder grant it encodes the drive's file key: pass it to
+            ``Identity.for_folder_grant``, not ``for_shared_drive``.
         frozen: The owner's account is limited.
+        path_prefix: Set for a folder grant: the one folder this account may reach.
     """
 
     owner_ss58: str
@@ -1129,3 +1147,4 @@ class DriveMembership:
     display_label: str
     folder_mnemonic: str | None = field(default=None, repr=False)
     frozen: bool = False
+    path_prefix: str | None = None

@@ -31,6 +31,7 @@ from hippius_drive.models import (
     CreatedShare,
     DriveMembership,
     DriveMembershipsWire,
+    DriveMembershipWire,
     InviteLinkKey,
     InviteMeta,
     InviteMint,
@@ -398,11 +399,12 @@ def accepted_invite(result: AcceptResult, folder_phrase: str, meta: InviteMeta) 
     """Pair an accept response with the phrase the link carried.
 
     Raises:
-        InvalidResponse: If a folder invite's accept does not echo its folder.
-            The grant would then be read as whole-drive when it is not, or
-            the reverse.
+        InvalidResponse: If the accept does not echo the invite's folder. The
+            grant would then be read as whole-drive when it is not, or the
+            reverse. The server echoes it for an owner opening their own
+            invite too.
     """
-    if not result.already_owner and (result.path_prefix or None) != invite_folder(meta):
+    if (result.path_prefix or None) != invite_folder(meta):
         raise errors.InvalidResponse("the accept did not echo the invite's folder")
     return AcceptedInvite(
         owner_ss58=result.owner_ss58,
@@ -417,9 +419,16 @@ def accepted_invite(result: AcceptResult, folder_phrase: str, meta: InviteMeta) 
 def open_memberships(
     member_master: str, member_ss58: str, page: DriveMembershipsWire
 ) -> list[DriveMembership]:
-    """Open each grant. An empty grant stays unopened rather than failing the list."""
+    """Open each grant, whole drives first, then folder grants.
+
+    An empty grant stays unopened rather than failing the list.
+    """
+    rows: list[tuple[DriveMembershipWire, str | None]] = [
+        *((row, None) for row in page.memberships),
+        *((row, row.path_prefix) for row in page.folder_grants),
+    ]
     opened: list[DriveMembership] = []
-    for row in page.memberships:
+    for row, path_prefix in rows:
         phrase = _open_one_grant(member_master, member_ss58, row.grant_blob)
         opened.append(
             DriveMembership(
@@ -429,6 +438,7 @@ def open_memberships(
                 display_label=row.display_label,
                 folder_mnemonic=phrase,
                 frozen=row.frozen,
+                path_prefix=path_prefix,
             )
         )
     return opened

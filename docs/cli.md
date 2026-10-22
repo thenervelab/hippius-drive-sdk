@@ -167,7 +167,7 @@ fetches the key sealed on the server. A folder invite also prints the folder it
 admits to; the server keeps that account inside it.
 
 `drives` lists memberships opened from this account's grants: owner, folder
-hash, role, and label. `drives leave` looks that row up and leaves as the
+hash, role, and label. Folder grants follow, shown as `label / folder`. `drives leave` looks that row up and leaves as the
 configured account. Changing a member's role, and uploading owner-wraps, are
 library calls.
 

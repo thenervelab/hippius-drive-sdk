@@ -693,6 +693,7 @@ def _drive_row(item: Any) -> dict[str, Any]:
         "role": item.role,
         "display_label": item.display_label,
         "frozen": item.frozen,
+        "path_prefix": item.path_prefix,
     }
 
 
@@ -710,7 +711,8 @@ def _folder_line(row: dict[str, Any]) -> str:
 def _drive_line(row: dict[str, Any]) -> str:
     frozen = "  frozen" if row["frozen"] else ""
     label = row["display_label"] or row["folder_hash"]
-    return f"{row['role']:<8}  {row['owner_ss58']}  {row['folder_hash']}  {label}{frozen}"
+    folder = f" / {row['path_prefix']}" if row.get("path_prefix") else ""
+    return f"{row['role']:<8}  {row['owner_ss58']}  {row['folder_hash']}  {label}{folder}{frozen}"
 
 
 def _joined(rows: Sequence[Any], owner: str, folder: str) -> tuple[str, str, str, str, str]:
