@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
+from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer, StrictBool
 
 
 def _to_bytes(value: Any) -> Any:
@@ -693,6 +693,7 @@ class Capabilities(_Wire):
         folder_share_revoke_by_hash: Revoke and expiry by ``token_hash``.
         share_owner_wrap: Owner-wrap upload is mounted.
         member_folder_shares: A member may mint a folder share on a shared drive.
+        drive_invite_link_envelopes: The server opens ``#i=`` link-secret invites.
     """
 
     shares: bool = False
@@ -700,6 +701,7 @@ class Capabilities(_Wire):
     folder_share_revoke_by_hash: bool = False
     share_owner_wrap: bool = False
     member_folder_shares: bool = False
+    drive_invite_link_envelopes: bool = False
 
 
 class ExpiryResult(_Wire):
@@ -881,6 +883,16 @@ class InviteMint(_Wire):
 
     invite_token: str
     invite_id: str | None = None
+
+
+class StoredEnvelope(_Wire):
+    """``PUT .../link-envelope``: ``{"stored": true}`` when the pair is stored.
+
+    Attributes:
+        stored: True once the server holds this exact envelope.
+    """
+
+    stored: StrictBool = False
 
 
 class InviteMeta(_Wire):
@@ -1093,16 +1105,17 @@ class OpenedShare:
 
 @dataclass(frozen=True)
 class CreatedInvite:
-    """An invite link. The fragment is the drive key and is not stored server-side.
+    """An invite link. Its fragment opens the drive key and never reaches the server.
 
     Attributes:
         invite_token: The plaintext join capability.
-        invite_url: ``{console}/invite/{token}#k={entropy}``.
+        invite_url: ``{console}/invite/{token}#i={link secret}``, or ``#k={entropy}``
+            on a server without link-secret invites.
         invite_id: Blake3 hex of the token.
     """
 
-    invite_token: str
-    invite_url: str
+    invite_token: str = field(repr=False)
+    invite_url: str = field(repr=False)
     invite_id: str
 
 

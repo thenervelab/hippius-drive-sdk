@@ -84,7 +84,7 @@ not in `__all__` — the CLI and the quickstart both import it.
 | List / revoke file shares | `client.shares.list()` / `client.shares.revoke(token)` |
 | Mint a folder-share link | `client.folder_shares.create(FolderShareSpec(prefix, name))` — fragment is the drive file key |
 | Revoke a folder share | `client.folder_shares.revoke(token_or_hash)` — list returns `token_hash` only |
-| Invite someone to this drive | `client.drives.create_invite(InviteSpec(folder_mnemonic, role="writer"))` |
+| Invite someone to this drive | `client.drives.create_invite(InviteSpec(folder_mnemonic, role="writer"))` — a `#i=` link when the server advertises `drive_invite_link_envelopes`, else `#k=` |
 | Join a drive | `client.drives.accept(url, member_master, member_ss58=account)` — `#k=` or `#i=`, whole drive or one folder (`accepted.path_prefix`) |
 | Act in a granted folder | `Identity.for_folder_grant(accepted.folder_mnemonic, owner_ss58=..., folder_hash=..., role=...)` — never `for_shared_drive` for a folder invite |
 | List joined drives | `client.drives.memberships(member_master, member_ss58=account)` — folder grants follow, with `path_prefix` set |

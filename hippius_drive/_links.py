@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import math
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from tempfile import SpooledTemporaryFile
 from typing import IO, Any
 
@@ -37,6 +37,7 @@ from hippius_drive.models import (
     InviteMint,
     MintedShare,
     ShareTtl,
+    StoredEnvelope,
 )
 
 DEFAULT_CONSOLE = "https://console.hippius.com"
@@ -91,14 +92,16 @@ class InviteSpec:
     """What the caller chose about a drive invite.
 
     Attributes:
-        folder_mnemonic: The owner's folder phrase. It becomes the ``#k=`` fragment.
+        folder_mnemonic: The owner's folder phrase. Its entropy is the drive key:
+            sealed on the server behind a ``#i=`` link, or the ``#k=`` fragment
+            itself on a server without link-secret invites.
         role: ``reader``, ``writer``, or ``manager``.
         expires_in_secs: Lifetime. None uses the server default.
         max_uses: Distinct members who may join. None uses the server default.
         console_base_url: Origin the invite URL is built against.
     """
 
-    folder_mnemonic: str
+    folder_mnemonic: str = field(repr=False)
     role: str = "writer"
     expires_in_secs: int | None = None
     max_uses: int | None = None
@@ -387,6 +390,70 @@ def open_link_key(fragment: InviteFragment, meta: InviteMeta, found: InviteLinkK
     except ValueError as exc:
         raise errors.InvalidResponse("invite link envelope is not standard base64") from exc
     return invite_link.open_envelope(fragment.material, envelope, expected)
+
+
+def mark_link_secret(body: dict[str, Any]) -> dict[str, Any]:
+    """Ask for a link-secret invite.
+
+    The server then treats the token as unknown until its envelope is
+    stored, so a mint whose envelope never lands cannot be opened as a
+    ``#k=`` link either. Servers that predate the flag ignore it.
+    """
+    return {**body, "link_secret": True}
+
+
+def minted_invite_id(minted: InviteMint) -> str:
+    """The id to revoke a fresh mint by: ``blake3(token)``, computed here.
+
+    The server's ``invite_id`` is that same hex, so the echo adds nothing;
+    and when it disagrees it is the value already found untrustworthy.
+    """
+    return blake3.blake3(minted.invite_token.encode()).hexdigest()
+
+
+def require_stored(stored: StoredEnvelope) -> None:
+    """Refuse a ``link-envelope`` answer that does not say it stored the pair.
+
+    Raises:
+        InvalidResponse: If ``stored`` is not true.
+    """
+    if not stored.stored:
+        raise errors.InvalidResponse("the server did not confirm the invite link envelope")
+
+
+def finish_link_invite(
+    minted: InviteMint, spec: InviteSpec
+) -> tuple[CreatedInvite, str, dict[str, str]]:
+    """Build a ``#i=`` invite: its URL, the seal-back token, and the envelope body.
+
+    Args:
+        minted: The mint response.
+        spec: Carries the folder phrase whose entropy the envelope seals.
+
+    Returns:
+        The link, the wire ``sealed_token`` (empty to skip seal-back), and the
+        ``link-envelope`` request body.
+
+    Raises:
+        InvalidResponse: If the server's ``invite_id`` is not ``blake3(token)``.
+            The secret is derived from that id, so no envelope could match.
+    """
+    entropy = grant.entropy_from_phrase(spec.folder_mnemonic)
+    raw_id = invite_link.invite_id_for_token(minted.invite_token)
+    invite_id = raw_id.hex()
+    if minted.invite_id is not None and minted.invite_id != invite_id:
+        raise errors.InvalidResponse("the server's invite_id is not blake3 of the token")
+    secret = invite_link.derive_link_secret(entropy, raw_id)
+    origin = grant.console_origin(spec.console_base_url)
+    url = invite_link.invite_link_url(origin, minted.invite_token, secret)
+    envelope = invite_link.seal_envelope(secret, entropy, InviteLinkKind.DRIVE)
+    body = {
+        "link_envelope": base64.b64encode(envelope).decode(),
+        "link_fetch_digest": base64.b64encode(invite_link.fetch_digest(secret)).decode(),
+    }
+    sealed = grant.seal_invite_token(entropy, invite_id, minted.invite_token)
+    created = CreatedInvite(minted.invite_token, url, invite_id)
+    return created, base64.b64encode(sealed).decode(), body
 
 
 def accept_grant(member_master: str, member_ss58: str, folder_phrase: str) -> str:

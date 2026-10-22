@@ -364,25 +364,41 @@ async def test_file_share_metadata_agrees_across_clients(identity: Identity) -> 
 async def test_invite_mint_agrees_across_clients(identity: Identity) -> None:
     token = "inviteTok"
     invite_id = blake3.blake3(token.encode()).hexdigest()
-    respx.post(f"{BASE}/v1/drive-invites").mock(
+    respx.get(f"{BASE}/v1/capabilities").mock(
+        return_value=httpx.Response(200, json={"drive_invite_link_envelopes": True})
+    )
+    mint = respx.post(f"{BASE}/v1/drive-invites").mock(
         return_value=httpx.Response(200, json={"invite_token": token, "invite_id": invite_id})
     )
     sealed = respx.put(url__regex=r".*/sealed-token$").mock(return_value=httpx.Response(204))
+    stored = respx.put(url__regex=r".*/link-envelope$").mock(
+        return_value=httpx.Response(200, json={"stored": True})
+    )
     spec = InviteSpec(kdf.derive_folder_mnemonic(MASTER, "default"), role="manager", max_uses=3)
 
     with Client(token="tok", identity=identity, transport=Transport(BASE, "tok")) as client:
         sync_created = client.drives.create_invite(spec)
-    sync_post = respx.calls[0].request.content
+    sync_order = [call.request.url.path for call in respx.calls]
+    sync_post = mint.calls.last.request.content
+    sync_digest = json.loads(stored.calls.last.request.content)["link_fetch_digest"]
 
     async with AsyncClient(
         token="tok", identity=identity, transport=AsyncTransport(BASE, "tok")
     ) as aclient:
         async_created = await aclient.drives.create_invite(spec)
-    async_post = respx.calls[2].request.content
+    async_order = [call.request.url.path for call in respx.calls][len(sync_order) :]
+    async_digest = json.loads(stored.calls.last.request.content)["link_fetch_digest"]
 
-    assert sync_post == async_post
-    assert json.loads(sync_post) == {"folder_hash": FOLDER, "role": "manager", "max_uses": 3}
-    prefix = f"https://console.hippius.com/invite/{token}#k="
+    assert async_order == sync_order
+    assert mint.calls.last.request.content == sync_post
+    assert json.loads(sync_post) == {
+        "folder_hash": FOLDER,
+        "role": "manager",
+        "max_uses": 3,
+        "link_secret": True,
+    }
+    assert async_digest == sync_digest
+    prefix = f"https://console.hippius.com/invite/{token}#i="
     assert sync_created.invite_url.startswith(prefix)
     assert async_created.invite_url == sync_created.invite_url
     assert sealed.call_count == 2

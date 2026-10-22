@@ -23,7 +23,7 @@ import binascii
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import blake3
 from nacl import bindings
@@ -110,6 +110,30 @@ def parse_invite_link(url: str) -> InviteFragment:
     if base64.urlsafe_b64encode(material).rstrip(b"=").decode() != raw:
         raise ValueError("invite fragment is not unpadded base64url")
     return InviteFragment(unquote(segments[1]), form, material)
+
+
+def invite_link_url(console_origin: str, token: str, link_secret: bytes) -> str:
+    """Build ``{origin}/invite/{token}#i={b64url(link_secret)}``.
+
+    Args:
+        console_origin: An https console origin without a trailing slash.
+        token: The plaintext invite token, a single base64url path segment.
+        link_secret: The invite's 32-byte link secret.
+
+    Returns:
+        The invite URL. The fragment is not sent to the server.
+
+    Raises:
+        ValueError: If the origin is not https, the token is not one path
+            segment, or the secret is not 32 bytes.
+    """
+    _check_len("link secret", link_secret)
+    if not console_origin.startswith("https://") or console_origin.endswith("/"):
+        raise ValueError("console origin must be https with no trailing slash")
+    if not token or "/" in token or "#" in token:
+        raise ValueError("invite token must be a single path segment")
+    fragment = base64.urlsafe_b64encode(link_secret).rstrip(b"=").decode()
+    return f"{console_origin}/invite/{quote(token, safe='')}#i={fragment}"
 
 
 def invite_id_for_token(token: str) -> bytes:
