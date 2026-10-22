@@ -1399,3 +1399,33 @@ def test_a_409_about_an_upload_session_is_reported_as_is(
     assert result.exit_code == 3
     assert "session_exists" in result.output
     assert "moved or deleted" not in result.output
+
+
+@respx.mock
+def test_a_revisionless_conflict_is_not_called_gone(env: dict[str, str], tmp_path: Path) -> None:
+    _browse_with([FILE_JSON])
+    respx.post(f"{BASE}/upload").mock(return_value=_conflict())
+    result = run(["put", str(_local(tmp_path)), "a.bin", "--overwrite"], env)
+    assert result.exit_code == 3
+    assert "moved or deleted" not in result.output
+    assert "refused the upload" in result.output
+
+
+@respx.mock
+def test_target_gone_is_called_gone(env: dict[str, str], tmp_path: Path) -> None:
+    body = {"Error": {"error": "target_gone", "message": "moved or deleted"}}
+    respx.post(f"{BASE}/upload").mock(return_value=httpx.Response(409, json=body))
+    result = run(
+        [
+            "put",
+            str(_local(tmp_path)),
+            "a.bin",
+            "--base-revision",
+            "ab" * 32,
+            "--revision-seq",
+            "2",
+        ],
+        env,
+    )
+    assert result.exit_code == 3
+    assert "was moved or deleted since it was read" in result.output

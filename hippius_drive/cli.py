@@ -423,13 +423,20 @@ def _put_once(client: Client, local: Path, remote: str, base: bytes | None, seq:
         raise ConflictExit(_conflict_message(remote, exc, replacing=base is not None)) from exc
 
 
-_GONE_CODES = frozenset({"conflict", "target_gone"})
-
-
 def _names_a_revision(exc: errors.Conflict) -> bool:
     """True when the 409 reports a live row: a non-zero revision and its sequence."""
     revision = exc.current_revision_id
     return revision is not None and any(revision) and exc.current_revision_seq is not None
+
+
+def _says_gone(exc: errors.Conflict) -> bool:
+    """True for hcfs's gone-file answers: ``target_gone``, or the all-zero revision.
+
+    A 409 with no revision at all is not one of them: hcfs sends that when it
+    could not re-read the row, which says nothing about the file being gone.
+    """
+    revision = exc.current_revision_id
+    return exc.code == "target_gone" or (revision is not None and not any(revision))
 
 
 def _conflict_message(remote: str, exc: errors.Conflict, *, replacing: bool) -> str:
@@ -437,7 +444,7 @@ def _conflict_message(remote: str, exc: errors.Conflict, *, replacing: bool) -> 
         if replacing:
             return f"{remote} changed since it was read; rerun to replace the newer version"
         return f"{remote} already exists; pass --overwrite to replace it"
-    if exc.code in _GONE_CODES:
+    if _says_gone(exc):
         return f"{remote} was moved or deleted since it was read; check before uploading again"
     # Session-state 409s (a chunked upload already running, say) are not
     # about the file's revision at all.
