@@ -1,6 +1,7 @@
 import ast
 import base64
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ import pytest
 import respx
 from click.testing import CliRunner, Result
 
-from hippius_drive import __version__, _links, cli
+from hippius_drive import __version__, _config, _links, cli
 from hippius_drive._transport import Transport
 from hippius_drive.cli import main
 from hippius_drive.client import Client
@@ -1244,3 +1245,156 @@ def test_drives_leave_uses_the_opened_grant(env: dict[str, str], sealed_grant: s
     assert route.calls.last.request.url.params["owner"] == OWNER
     phrase = kdf.derive_folder_mnemonic(MASTER, "default")
     assert phrase not in result.output
+
+
+ACCESS_KEY = " ".join(["abandon"] * 11 + ["about"])
+ACCESS_SS58 = "5EPCUjPxiHAcNooYipQFWr9NmmXJKpNG5RhcntXwbtUySrgH"
+API = "https://api.example.test"
+
+
+@pytest.fixture
+def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "home" / "config.toml"
+    monkeypatch.setattr("hippius_drive._config.CONFIG_PATH", path)
+    return path
+
+
+def _phrase_file(tmp_path: Path, mode: int = 0o600) -> Path:
+    path = tmp_path / "access-key.txt"
+    path.write_text(ACCESS_KEY + "\n")
+    path.chmod(mode)
+    return path
+
+
+def _mock_api() -> respx.Route:
+    message = "Please sign this message to verify your ownership: " + "cd" * 32
+    respx.post(f"{API}/api/auth/mnemonic/").mock(
+        return_value=httpx.Response(200, json={"challenge": "cd" * 32, "message": message})
+    )
+    return respx.post(f"{API}/api/auth/verify/").mock(
+        return_value=httpx.Response(
+            200,
+            json={"token": "tok-secret", "username": "agent", "substrate_address": ACCESS_SS58},
+        )
+    )
+
+
+@respx.mock
+def test_auth_login_saves_the_token_and_account_and_prints_neither_secret(
+    tmp_path: Path, config_path: Path
+) -> None:
+    verify = _mock_api()
+    phrase = _phrase_file(tmp_path)
+    result = run(["auth", "login", "--phrase-file", str(phrase), "--api", API], {})
+    assert result.exit_code == 0, result.output
+    assert verify.called
+    assert f"account   {ACCESS_SS58}" in result.output
+    assert f"token     saved to {config_path}" in result.output
+    assert "tok-secret" not in result.output
+    assert ACCESS_KEY not in result.output
+    cfg = _config.load({}, environ={}, config_path=config_path)
+    assert (cfg.token, cfg.account_ss58) == ("tok-secret", ACCESS_SS58)
+
+
+@respx.mock
+def test_auth_login_reads_the_phrase_from_stdin(config_path: Path) -> None:
+    _mock_api()
+    result = CliRunner().invoke(
+        main,
+        ["auth", "login", "--phrase-file", "-"],
+        input=ACCESS_KEY + "\n",
+        env={"HIPPIUS_API_URL": API},
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert ACCESS_KEY not in result.output
+
+
+@respx.mock
+def test_auth_login_can_write_the_token_to_its_own_file(tmp_path: Path, config_path: Path) -> None:
+    _mock_api()
+    token_file = tmp_path / "token"
+    args = ["auth", "login", "--phrase-file", str(_phrase_file(tmp_path)), "--api", API]
+    result = run([*args, "--token-file", str(token_file)], {})
+    assert result.exit_code == 0, result.output
+    assert token_file.read_text().strip() == "tok-secret"
+    if os.name == "posix":
+        assert token_file.stat().st_mode & 0o777 == 0o600
+    cfg = _config.load({}, environ={}, config_path=config_path)
+    assert (cfg.token, cfg.account_ss58) == (None, ACCESS_SS58)
+    assert f"account   saved to {config_path}" in result.output
+
+
+@respx.mock
+def test_auth_login_defaults_to_the_encrypted_mnemonic(
+    mnemonic_file: Path, config_path: Path
+) -> None:
+    # MASTER is a valid phrase too; the API mock only checks the flow.
+    message = "Please sign this message to verify your ownership: " + "cd" * 32
+    respx.post(f"{API}/api/auth/mnemonic/").mock(
+        return_value=httpx.Response(200, json={"challenge": "cd" * 32, "message": message})
+    )
+    respx.post(f"{API}/api/auth/verify/").mock(
+        return_value=httpx.Response(200, json={"token": "t2"})
+    )
+    env = {"HIPPIUS_MNEMONIC_FILE": str(mnemonic_file), "HIPPIUS_PASSWORD": PASSWORD}
+    result = run(["auth", "login", "--api", API], env)
+    assert result.exit_code == 0, result.output
+    assert MASTER not in result.output
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_auth_login_refuses_a_phrase_file_others_can_read(
+    tmp_path: Path, config_path: Path
+) -> None:
+    phrase = _phrase_file(tmp_path, mode=0o644)
+    result = run(["auth", "login", "--phrase-file", str(phrase), "--api", API], {})
+    assert result.exit_code != 0
+    assert "chmod 600" in result.output
+    assert not config_path.exists()
+
+
+def test_auth_login_reports_an_unreadable_phrase_file(tmp_path: Path, config_path: Path) -> None:
+    result = run(["auth", "login", "--phrase-file", str(tmp_path / "missing"), "--api", API], {})
+    assert result.exit_code != 0
+    assert "cannot read" in result.output
+
+
+@respx.mock
+def test_auth_login_turns_a_refusal_into_one_line(tmp_path: Path, config_path: Path) -> None:
+    respx.post(f"{API}/api/auth/mnemonic/").mock(
+        return_value=httpx.Response(401, json={"error": "Invalid signature", "code": "x"})
+    )
+    result = run(["auth", "login", "--phrase-file", str(_phrase_file(tmp_path)), "--api", API], {})
+    assert result.exit_code == 1
+    assert "401" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_auth_login_names_the_extra_when_it_is_missing(
+    tmp_path: Path, config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing(*_args: Any, **_kwargs: Any) -> None:
+        raise ImportError("access-key login needs the login extra")
+
+    monkeypatch.setattr(cli.api_auth, "login", missing)
+    result = run(["auth", "login", "--phrase-file", str(_phrase_file(tmp_path)), "--api", API], {})
+    assert result.exit_code != 0
+    assert "login extra" in result.output
+
+
+def test_init_imports_from_a_phrase_file_and_never_echoes_it(tmp_path: Path) -> None:
+    path = tmp_path / "enc.json"
+    env = {"HIPPIUS_MNEMONIC_FILE": str(path), "HIPPIUS_PASSWORD": PASSWORD}
+    result = run(["init", "--phrase-file", str(_phrase_file(tmp_path))], env)
+    assert result.exit_code == 0, result.output
+    assert ACCESS_KEY not in result.output
+    assert mnemonic_store.load(path, PASSWORD) == ACCESS_KEY
+
+
+def test_init_takes_one_phrase_source(tmp_path: Path) -> None:
+    env = {"HIPPIUS_MNEMONIC_FILE": str(tmp_path / "e.json"), "HIPPIUS_PASSWORD": PASSWORD}
+    args = ["init", "--mnemonic", MASTER, "--phrase-file", str(_phrase_file(tmp_path))]
+    result = run(args, env)
+    assert result.exit_code != 0
+    assert "not both" in result.output

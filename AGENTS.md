@@ -23,7 +23,11 @@ You need **three** things, and they are not interchangeable:
 | Recovery phrase | Generated locally; never sent anywhere | Encryption and signing keys |
 
 The server resolves the token to an address and refuses any request naming a
-different one. **The phrase does not produce the account address.** A 403 on
+different one. **The phrase does not produce the account address**, with one
+exception: an access-key account, whose address is the sr25519 key of that
+access key. `hippius_drive.auth.login(access_key)` (the `login` extra) signs
+in with it and returns the token and that address together; the CLI is
+`hippius-drive auth login --phrase-file FILE`. A 403 on
 the first call almost always means token and `account_ss58` were paired from
 different accounts.
 
@@ -187,7 +191,9 @@ Resolution order: flags, then environment, then
 | — | `HIPPIUS_PASSWORD` (prompted on a TTY otherwise) |
 
 ```bash
+hippius-drive auth login --phrase-file F    # access key -> token + account in config (0600)
 hippius-drive init                          # prints the phrase once
+hippius-drive init --phrase-file F          # import; never printed
 hippius-drive whoami                        # first check on a 403
 hippius-drive register
 hippius-drive put report.pdf work/report.pdf
