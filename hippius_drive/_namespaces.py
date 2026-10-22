@@ -17,7 +17,7 @@ import httpx
 from hippius_drive import _links, _ops, errors
 from hippius_drive._upload import SPOOL_MAX, PlaintextSource, reader_over
 from hippius_drive._wire import parse_envelope
-from hippius_drive.crypto import file_cipher
+from hippius_drive.crypto import file_cipher, invite_link
 from hippius_drive.crypto.sharing import ShareSecret
 from hippius_drive.models import (
     AcceptedInvite,
@@ -428,17 +428,24 @@ class DriveOps:
         """Join a drive and seal its folder phrase under the member's master.
 
         Args:
-            invite_url: The URL from :meth:`create_invite`.
+            invite_url: An invite URL, ``#k=`` or ``#i=``. A ``#i=`` link costs
+                two extra requests: the preview and the sealed key.
             member_master: The member's master phrase. It is not the drive key.
             member_ss58: The account ``member_master``'s token resolves to.
 
         Returns:
             The drive identity and the folder phrase for ``Identity.for_shared_drive``.
         """
-        token, entropy = _links.grant.parse_invite_url(invite_url)
-        phrase = _links.grant.phrase_from_entropy(entropy)
+        fragment = invite_link.parse_invite_link(invite_url)
+        key = fragment.material
+        if _links.needs_link_key(fragment):
+            meta = self._client.run(_ops.invite_meta(fragment.token))
+            proof = _links.link_proof(fragment, meta)
+            found = self._client.run(_ops.invite_link_key(fragment.token, proof))
+            key = _links.open_link_key(fragment, meta, found)
+        phrase = _links.grant.phrase_from_entropy(key)
         blob = _links.accept_grant(member_master, member_ss58, phrase)
-        result = self._client.run(_ops.accept_invite(token, blob))
+        result = self._client.run(_ops.accept_invite(fragment.token, blob))
         return _links.accepted_invite(result, phrase)
 
     def memberships(self, member_master: str, *, member_ss58: str) -> Sequence[DriveMembership]:
@@ -467,8 +474,7 @@ class DriveOps:
 
 def _plain_invite_token(token: str) -> str:
     if token.startswith("https://"):
-        parsed, _entropy = _links.grant.parse_invite_url(token)
-        return parsed
+        return invite_link.parse_invite_link(token).token
     return token
 
 
@@ -680,10 +686,16 @@ class AsyncDriveOps:
         self, invite_url: str, member_master: str, *, member_ss58: str
     ) -> AcceptedInvite:
         """Async twin of :meth:`DriveOps.accept`."""
-        token, entropy = _links.grant.parse_invite_url(invite_url)
-        phrase = _links.grant.phrase_from_entropy(entropy)
+        fragment = invite_link.parse_invite_link(invite_url)
+        key = fragment.material
+        if _links.needs_link_key(fragment):
+            meta = await self._client.run(_ops.invite_meta(fragment.token))
+            proof = _links.link_proof(fragment, meta)
+            found = await self._client.run(_ops.invite_link_key(fragment.token, proof))
+            key = _links.open_link_key(fragment, meta, found)
+        phrase = _links.grant.phrase_from_entropy(key)
         blob = _links.accept_grant(member_master, member_ss58, phrase)
-        result = await self._client.run(_ops.accept_invite(token, blob))
+        result = await self._client.run(_ops.accept_invite(fragment.token, blob))
         return _links.accepted_invite(result, phrase)
 
     async def memberships(

@@ -10,10 +10,13 @@ import httpx
 import pytest
 import respx
 
+from hippius_drive import _links
 from hippius_drive._links import DEFAULT_CONSOLE, InviteSpec
-from hippius_drive._transport import Transport
-from hippius_drive.client import Client
-from hippius_drive.crypto import kdf
+from hippius_drive._transport import AsyncTransport, Transport
+from hippius_drive.client import AsyncClient, Client
+from hippius_drive.crypto import invite_link, kdf
+from hippius_drive.crypto.invite_link import InviteLinkKind
+from hippius_drive.errors import DecryptError, InvalidResponse, NotFound
 from hippius_drive.identity import Identity
 
 BASE = "https://example.test"
@@ -125,3 +128,135 @@ def test_invite_meta_does_not_send_the_bearer(client: Client) -> None:
     assert meta.owner_ss58 == SS58
     assert meta.valid is True
     assert route.calls.last.request.headers.get("Authorization") is None
+
+
+def _link_secret() -> bytes:
+    entropy = kdf.folder_entropy(MASTER, "default")
+    return invite_link.derive_link_secret(entropy, invite_link.invite_id_for_token(TOKEN))
+
+
+def _link_url() -> str:
+    fragment = base64.urlsafe_b64encode(_link_secret()).rstrip(b"=").decode()
+    return f"{DEFAULT_CONSOLE}/invite/{TOKEN}#i={fragment}"
+
+
+def _mock_link_invite(
+    *, path_prefix: str | None = None, kind: str = "drive", envelope: bytes | None = None
+) -> tuple[respx.Route, respx.Route]:
+    meta: dict[str, object] = {"owner_ss58": SS58, "folder_hash": FOLDER, "valid": True}
+    if path_prefix is not None:
+        meta["path_prefix"] = path_prefix
+    meta_route = respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/meta").mock(
+        return_value=httpx.Response(200, json=meta)
+    )
+    if envelope is None:
+        entropy = kdf.folder_entropy(MASTER, "default")
+        envelope = invite_link.seal_envelope(_link_secret(), entropy, InviteLinkKind.DRIVE)
+    key_route = respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/link-key").mock(
+        return_value=httpx.Response(
+            200, json={"envelope": base64.b64encode(envelope).decode(), "kind": kind}
+        )
+    )
+    return meta_route, key_route
+
+
+def _accepted() -> httpx.Response:
+    return httpx.Response(200, json={"owner_ss58": SS58, "folder_hash": FOLDER, "role": "writer"})
+
+
+@respx.mock
+def test_a_link_secret_invite_opens_its_envelope_and_joins(client: Client) -> None:
+    # Seals a grant under the production Argon2id parameters.
+    meta_route, key_route = _mock_link_invite()
+    accept = respx.post(f"{BASE}/v1/drive-invites/{TOKEN}/accept").mock(return_value=_accepted())
+    accepted = client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+    assert accepted.folder_mnemonic == _phrase()
+    assert accepted.role == "writer"
+    assert meta_route.calls.last.request.headers.get("Authorization") is None
+    sent = key_route.calls.last.request.headers
+    assert sent["x-hcfs-link-proof"] == invite_link.fetch_proof(_link_secret())
+    assert sent["Authorization"] == "Bearer tok"
+    assert accept.called
+
+
+@respx.mock
+def test_a_link_secret_folder_invite_is_refused_before_the_key_is_fetched(
+    client: Client,
+) -> None:
+    _meta, key_route = _mock_link_invite(path_prefix="Clients/ACME")
+    with pytest.raises(ValueError, match="folder invites"):
+        client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+    assert key_route.calls == []
+
+
+@respx.mock
+def test_a_link_kind_that_disagrees_with_the_preview_is_refused(client: Client) -> None:
+    _mock_link_invite(kind="folder")
+    accept = respx.post(f"{BASE}/v1/drive-invites/{TOKEN}/accept")
+    with pytest.raises(InvalidResponse, match="does not match"):
+        client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+    assert accept.calls == []
+
+
+@respx.mock
+def test_an_envelope_sealed_as_a_folder_does_not_open_as_a_drive(client: Client) -> None:
+    folder = invite_link.seal_envelope(_link_secret(), bytes(32), InviteLinkKind.FOLDER)
+    _mock_link_invite(envelope=folder)
+    with pytest.raises(DecryptError):
+        client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+
+
+@respx.mock
+def test_an_envelope_that_is_not_base64_is_a_decrypt_error(client: Client) -> None:
+    respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/meta").mock(
+        return_value=httpx.Response(200, json={"owner_ss58": SS58, "folder_hash": FOLDER})
+    )
+    respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/link-key").mock(
+        return_value=httpx.Response(200, json={"envelope": "***", "kind": "drive"})
+    )
+    with pytest.raises(DecryptError, match="base64"):
+        client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+
+
+@respx.mock
+def test_a_dead_link_is_a_bodiless_not_found(client: Client) -> None:
+    respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/meta").mock(
+        return_value=httpx.Response(200, json={"owner_ss58": SS58, "folder_hash": FOLDER})
+    )
+    respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/link-key").mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+
+
+@respx.mock
+def test_invite_meta_takes_a_link_secret_url(client: Client) -> None:
+    route = respx.get(f"{BASE}/v1/drive-invites/{TOKEN}/meta").mock(
+        return_value=httpx.Response(200, json={"owner_ss58": SS58, "path_prefix": "Work"})
+    )
+    meta = client.drives.invite_meta(_link_url())
+    assert meta.path_prefix == "Work"
+    assert route.called
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_the_async_client_accepts_a_link_secret_invite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sealed: list[str] = []
+
+    def fake_grant(member_master: str, member_ss58: str, folder_phrase: str) -> str:
+        sealed.append(folder_phrase)
+        return base64.b64encode(b"{}").decode()
+
+    monkeypatch.setattr(_links, "accept_grant", fake_grant)
+    identity = Identity.from_master(MASTER, "default", account_ss58=SS58)
+    client = AsyncClient(token="tok", identity=identity, transport=AsyncTransport(BASE, "tok"))
+    _meta, key_route = _mock_link_invite()
+    respx.post(f"{BASE}/v1/drive-invites/{TOKEN}/accept").mock(return_value=_accepted())
+    accepted = await client.drives.accept(_link_url(), MASTER, member_ss58=SS58)
+    assert accepted.folder_mnemonic == _phrase()
+    assert sealed == [_phrase()]
+    proof = key_route.calls.last.request.headers["x-hcfs-link-proof"]
+    assert proof == invite_link.fetch_proof(_link_secret())
+    await client.aclose()

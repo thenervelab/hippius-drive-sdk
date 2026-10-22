@@ -20,7 +20,7 @@ import base64
 import binascii
 import json
 import os
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote
 
 import blake3
 from cryptography.hazmat.primitives import hashes
@@ -29,7 +29,7 @@ from mnemonic import Mnemonic
 from nacl import bindings
 from nacl.exceptions import CryptoError
 
-from hippius_drive.crypto import mnemonic_blob
+from hippius_drive.crypto import invite_link, mnemonic_blob
 from hippius_drive.crypto.mnemonic_blob import SealedBlob
 from hippius_drive.errors import DecryptError
 
@@ -39,7 +39,6 @@ _KEY_LEN = 32
 _NONCE_LEN = 24
 _SEED_LEN = 64
 _INVITE_VERSION = 1
-_INVITE_PATH_LEN = 2
 _BIP39 = Mnemonic("english")
 
 
@@ -150,7 +149,10 @@ def invite_url(console_base_url: str, token: str, entropy: bytes) -> str:
 
 
 def parse_invite_url(url: str) -> tuple[str, bytes]:
-    """Split an invite URL into its token and folder entropy.
+    """Split a ``#k=`` invite URL into its token and folder entropy.
+
+    A ``#i=`` link carries a link secret, not the key; parse it with
+    :func:`hippius_drive.crypto.invite_link.parse_invite_link`.
 
     Args:
         url: An invite URL.
@@ -159,25 +161,12 @@ def parse_invite_url(url: str) -> tuple[str, bytes]:
         ``(token, entropy)``.
 
     Raises:
-        ValueError: If the URL is not an invite link or the fragment is short.
+        ValueError: If the URL is not a ``#k=`` invite link or the fragment is short.
     """
-    parts = urlsplit(url)
-    if parts.scheme != "https" or not parts.netloc:
-        raise ValueError("invite URL must be an absolute https URL")
-    segments = [segment for segment in parts.path.split("/") if segment]
-    if len(segments) != _INVITE_PATH_LEN or segments[0] != "invite":
-        raise ValueError("invite URL path must be /invite/{token}")
-    if not parts.fragment.startswith("k="):
+    parsed = invite_link.parse_invite_link(url)
+    if parsed.form is not invite_link.FragmentForm.LEGACY_KEY:
         raise ValueError("invite URL needs a #k= fragment")
-    raw = parts.fragment[2:]
-    pad = "=" * (-len(raw) % 4)
-    try:
-        entropy = base64.urlsafe_b64decode(raw + pad)
-    except binascii.Error as exc:
-        raise ValueError("invite fragment is not base64url") from exc
-    if len(entropy) != _KEY_LEN:
-        raise ValueError(f"folder-key entropy must be {_KEY_LEN} bytes, got {len(entropy)}")
-    return unquote(segments[1]), entropy
+    return parsed.token, parsed.material
 
 
 def seal_grant(member_master: str, member_ss58: str, folder_phrase: str) -> bytes:

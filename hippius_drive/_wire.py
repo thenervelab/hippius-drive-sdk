@@ -1017,6 +1017,21 @@ class RequestBuilders:
         return _capability("GET", f"/v1/drive-invites/{_token(token)}/meta", anonymous=True)
 
     @staticmethod
+    def invite_link_key(token: str, proof: str) -> Request:
+        """Build ``GET /v1/drive-invites/{token}/link-key``.
+
+        Args:
+            token: The plaintext invite token.
+            proof: Unpadded base64url of the link secret's fetch key.
+        """
+        return Request(
+            "GET",
+            f"/v1/drive-invites/{_token(token)}/link-key",
+            headers={"x-hcfs-link-proof": proof},
+            redact_url=True,
+        )
+
+    @staticmethod
     def accept_invite(token: str, grant_blob: str) -> Request:
         """Build ``POST /v1/drive-invites/{token}/accept``.
 
