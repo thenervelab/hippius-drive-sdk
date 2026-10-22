@@ -210,6 +210,9 @@ class RemoteFileEntry(_Wire):
         chunk_hashes: Per-chunk storage hashes, when available.
         uploaded_by: Verified uploader. The key is absent, not null, on rows
             that predate attribution: render a dash, never a guess.
+        uploaded_by_name: The uploader's display name, when their account has one.
+        uploaded_by_email: The uploader's email, when their account has one.
+            Both are absent whenever ``uploaded_by`` is.
         created_at: Unix seconds.
         updated_at: Unix seconds.
     """
@@ -225,6 +228,8 @@ class RemoteFileEntry(_Wire):
     arion_hash: str | None = None
     chunk_hashes: list[str] | None = None
     uploaded_by: str | None = None
+    uploaded_by_name: str | None = None
+    uploaded_by_email: str | None = None
     created_at: int | None = None
     updated_at: int | None = None
 

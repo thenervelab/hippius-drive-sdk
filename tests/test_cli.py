@@ -239,6 +239,25 @@ def test_ls_shows_folders_before_files(env: dict[str, str]) -> None:
 
 
 @respx.mock
+def test_ls_names_who_added_each_file(env: dict[str, str]) -> None:
+    named = {**FILE_JSON, "uploaded_by": "5Fmember", "uploaded_by_name": "agent-jack"}
+    unnamed = {**FILE_JSON, "relative_path": "b.bin", "uploaded_by": "5Fother"}
+    legacy = {**FILE_JSON, "relative_path": "c.bin"}
+    respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
+        return_value=httpx.Response(200, json={"Success": {"files": [named, unnamed, legacy]}})
+    )
+    lines = run(["ls"], env).output.strip().splitlines()
+    assert lines[0].endswith("a.bin  (by agent-jack)")
+    assert lines[1].endswith("b.bin  (by 5Fother)")
+    assert lines[2].endswith("c.bin")
+    rows = json.loads(run(["ls", "--json"], env).output)
+    assert rows[0]["uploaded_by_name"] == "agent-jack"
+    assert rows[0]["uploaded_by"] == "5Fmember"
+    assert rows[0]["uploaded_by_email"] is None
+    assert rows[2]["uploaded_by"] is None
+
+
+@respx.mock
 def test_ls_all_walks_get_state(env: dict[str, str]) -> None:
     route = respx.get(f"{BASE}/get_state/{SS58}/{FOLDER}").mock(
         return_value=httpx.Response(

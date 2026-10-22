@@ -77,6 +77,13 @@ def test_remote_file_entry_accepts_the_documented_block() -> None:
     assert entry.chunk_hashes == ["Qm...", "Qm..."]
 
 
+def test_uploader_name_and_email_ride_along_with_uploaded_by() -> None:
+    body = {**GET_STATE_FILE, "uploaded_by_name": "Ada", "uploaded_by_email": "ada@example.com"}
+    entry = models.RemoteFileEntry.model_validate(body)
+    assert (entry.uploaded_by_name, entry.uploaded_by_email) == ("Ada", "ada@example.com")
+    assert models.RemoteFileEntry.model_validate(GET_STATE_FILE).uploaded_by_name is None
+
+
 def test_missing_uploaded_by_stays_none() -> None:
     body = {k: v for k, v in GET_STATE_FILE.items() if k != "uploaded_by"}
     assert models.RemoteFileEntry.model_validate(body).uploaded_by is None
