@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import IO, Any
 from urllib.parse import quote
 
@@ -17,6 +17,7 @@ from hippius_drive.models import BrowseOptions, SearchFilters
 
 BAD_REQUEST = 400
 PAYMENT_REQUIRED = 402
+FORBIDDEN = 403
 CONFLICT = 409
 TOO_MANY_REQUESTS = 429
 GONE = 410
@@ -109,6 +110,9 @@ def _raise_for(status: int, fields: dict[str, Any], retry_after: int | None) -> 
         _raise_conflict(fields, status)
     if status == TOO_MANY_REQUESTS:
         raise errors.RateLimited(code, message, status, retry_after=retry_after)
+    if status == FORBIDDEN and code == "drive_member_limit_reached":
+        limit = _optional_int(fields.get("member_limit"))
+        raise errors.MemberLimitReached(code, message, status, member_limit=limit)
 
     fallback = errors.ServerError if status >= INTERNAL_SERVER_ERROR else errors.DriveError
     raise _STATUS_ERRORS.get(status, fallback)(code, message, status)
@@ -179,7 +183,7 @@ class Request:
     json: dict[str, Any] | None = None
     content: bytes | Iterable[bytes] | None = None
     files: list[MultipartField] | None = None
-    headers: dict[str, str] | None = None
+    headers: dict[str, str] | None = field(default=None, repr=False)
     replayable: bool | None = None
     authenticated: bool = True
     redact_url: bool = False
@@ -1015,6 +1019,21 @@ class RequestBuilders:
             token: The plaintext invite token.
         """
         return _capability("GET", f"/v1/drive-invites/{_token(token)}/meta", anonymous=True)
+
+    @staticmethod
+    def invite_link_key(token: str, proof: str) -> Request:
+        """Build ``GET /v1/drive-invites/{token}/link-key``.
+
+        Args:
+            token: The plaintext invite token.
+            proof: Unpadded base64url of the link secret's fetch key.
+        """
+        return Request(
+            "GET",
+            f"/v1/drive-invites/{_token(token)}/link-key",
+            headers={"x-hcfs-link-proof": proof},
+            redact_url=True,
+        )
 
     @staticmethod
     def accept_invite(token: str, grant_blob: str) -> Request:

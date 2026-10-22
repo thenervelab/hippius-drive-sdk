@@ -18,7 +18,8 @@ import blake3
 from hippius_drive import _ops, errors
 from hippius_drive._ops import Op
 from hippius_drive._upload import SPOOL_MAX, TRANSPORT_CHUNK, PlaintextSource
-from hippius_drive.crypto import file_cipher, grant, hashes, owner_wrap, sharing
+from hippius_drive.crypto import file_cipher, grant, hashes, invite_link, owner_wrap, sharing
+from hippius_drive.crypto.invite_link import FragmentForm, InviteFragment, InviteLinkKind
 from hippius_drive.crypto.sharing import ShareSecret
 from hippius_drive.errors import DecryptError, NotFound
 from hippius_drive.identity import MANAGER, OWNER, Identity
@@ -30,6 +31,8 @@ from hippius_drive.models import (
     CreatedShare,
     DriveMembership,
     DriveMembershipsWire,
+    InviteLinkKey,
+    InviteMeta,
     InviteMint,
     MintedShare,
     ShareTtl,
@@ -336,6 +339,54 @@ def finish_invite(minted: InviteMint, spec: InviteSpec) -> tuple[CreatedInvite, 
     sealed = grant.seal_invite_token(entropy, digest, minted.invite_token)
     wire = base64.b64encode(sealed).decode()
     return CreatedInvite(minted.invite_token, url, digest), wire
+
+
+def needs_link_key(fragment: InviteFragment) -> bool:
+    """True for a ``#i=`` link, whose key has to be fetched and opened first."""
+    return fragment.form is FragmentForm.LINK_SECRET
+
+
+def link_proof(fragment: InviteFragment, meta: InviteMeta) -> str:
+    """The ``x-hcfs-link-proof`` header for a ``#i=`` link.
+
+    Raises:
+        ValueError: For a folder invite, which this SDK cannot accept yet.
+    """
+    if meta.path_prefix:
+        raise ValueError("folder invites are not supported yet; accept this one in the console")
+    return invite_link.fetch_proof(fragment.material)
+
+
+def open_link_key(fragment: InviteFragment, meta: InviteMeta, found: InviteLinkKey) -> bytes:
+    """Open a ``#i=`` invite's envelope as the kind the preview implies.
+
+    The kind comes from the anonymous preview, never from the server's
+    ``kind`` alone: a folder invite's file key must not be taken for drive
+    entropy, and the AAD makes the envelope refuse to open as the wrong kind.
+
+    Args:
+        fragment: The parsed ``#i=`` link.
+        meta: The invite preview.
+        found: The ``link-key`` response.
+
+    Returns:
+        The 32-byte key the envelope sealed.
+
+    Raises:
+        InvalidResponse: If the server's ``kind`` disagrees with the preview,
+            or the envelope is not base64.
+        DecryptError: If the envelope has the wrong shape or does not open.
+    """
+    expected = InviteLinkKind.FOLDER if meta.path_prefix else InviteLinkKind.DRIVE
+    if found.kind != expected.value:
+        raise errors.InvalidResponse(
+            f"invite link kind {found.kind!r} does not match the invite ({expected.value})"
+        )
+    try:
+        envelope = base64.b64decode(found.envelope, validate=True)
+    except ValueError as exc:
+        raise errors.InvalidResponse("invite link envelope is not standard base64") from exc
+    return invite_link.open_envelope(fragment.material, envelope, expected)
 
 
 def accept_grant(member_master: str, member_ss58: str, folder_phrase: str) -> str:

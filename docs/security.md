@@ -149,8 +149,12 @@ you share.
 
 ## Shared drives
 
-Joining a drive gives the member that drive's file key, carried in the invite
-fragment and sealed into the member's grant. The member can decrypt the files
+Joining a drive gives the member that drive's file key, sealed into the
+member's grant. A `#k=` invite carries the key in its fragment, so anyone who
+ever held the URL holds the key, and revoking the invite does not take it back.
+A `#i=` invite carries a link secret instead: the server releases the key,
+sealed under that secret, only to a signed-in account that could still accept
+the invite. The member can decrypt the files
 in the drive. The owner's master recovery phrase stays with the owner. A member
 token cannot register or unregister the folder, and a reader cannot upload.
 

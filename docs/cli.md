@@ -158,7 +158,7 @@ File-share `ls` prints the plaintext token. Folder-share `ls` prints
 ```bash
 hippius-drive invite put                         # writer, server-default lifetime
 hippius-drive invite put --role reader --days 7
-hippius-drive invite accept 'https://console.hippius.com/invite/TOKEN#k=...'
+hippius-drive invite accept 'https://console.hippius.com/invite/TOKEN#i=...'   # or #k=
 
 hippius-drive drives
 hippius-drive drives --json
@@ -167,7 +167,9 @@ hippius-drive drives leave OWNER_SS58 FOLDER_HASH
 
 `invite put` prints the invite URL and performs the seal-back itself. It does
 not print the folder phrase. `invite accept` uses this configuration's mnemonic
-file and `--account`, and prints the owner, folder hash, and role.
+file and `--account`, and prints the owner, folder hash, and role. It takes both
+link forms: a `#k=` link carries the drive key, a `#i=` link carries a secret that
+fetches the key sealed on the server. Folder invites are not supported yet.
 
 `drives` lists memberships opened from this account's grants: owner, folder
 hash, role, and label. `drives leave` looks that row up and leaves as the

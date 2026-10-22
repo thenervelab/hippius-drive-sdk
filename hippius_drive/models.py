@@ -894,6 +894,7 @@ class InviteMeta(_Wire):
         expires_at: RFC 3339.
         role: The role an accept would grant.
         valid: False when an accept would return 410.
+        path_prefix: Set for a folder invite: the one folder it admits to.
     """
 
     owner_ss58: str = ""
@@ -903,6 +904,20 @@ class InviteMeta(_Wire):
     expires_at: str = ""
     role: str = "writer"
     valid: bool = False
+    path_prefix: str | None = None
+
+
+class InviteLinkKey(_Wire):
+    """``GET /v1/drive-invites/{token}/link-key``: a ``#i=`` invite's sealed key.
+
+    Attributes:
+        envelope: Standard base64 of the 73-byte envelope.
+        kind: ``drive`` (the envelope seals the drive entropy) or ``folder``
+            (it seals the drive's derived file key).
+    """
+
+    envelope: str
+    kind: str
 
 
 class AcceptResult(_Wire):

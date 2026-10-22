@@ -776,6 +776,16 @@ def invite_meta(token: str) -> Op[models.InviteMeta]:
     return Op(build.invite_meta(token), _parser(models.InviteMeta))
 
 
+def invite_link_key(token: str, proof: str) -> Op[models.InviteLinkKey]:
+    """Fetch a ``#i=`` invite's envelope. A bodiless 404 covers every refusal.
+
+    Args:
+        token: The plaintext invite token.
+        proof: The ``x-hcfs-link-proof`` header value.
+    """
+    return Op(build.invite_link_key(token, proof), _parser(models.InviteLinkKey))
+
+
 def accept_invite(token: str, grant_blob: str) -> Op[models.AcceptResult]:
     """Join a drive.
 
