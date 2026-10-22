@@ -40,6 +40,9 @@ FILE_ID_HEX_LEN = 64
 _CONSOLE = "https://console.hippius.com"
 """Console origin a minted link uses unless ``--console`` says otherwise."""
 
+ENV_INVITE_URL = "HIPPIUS_INVITE_URL"
+"""Environment variable ``drives join`` reads the invite URL from."""
+
 _DAY_SECONDS = 86_400
 """Seconds in a day, for ``invite put --days``."""
 
@@ -854,13 +857,56 @@ def invite_put(obj: Context, role: str, days: int | None, console: str) -> None:
 
 
 @invite.command("accept")
-@click.argument("url")
+@click.argument("url", required=False)
+@click.option(
+    "--invite-file",
+    type=click.Path(path_type=Path, allow_dash=True),
+    default=None,
+    help="Read the invite URL from this owner-only file, or - for stdin.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
 @click.pass_obj
-def invite_accept(obj: Context, url: str) -> None:
-    """Join a drive. Prints the drive id and role."""
+def invite_accept(obj: Context, url: str | None, invite_file: Path | None, as_json: bool) -> None:
+    """Join a drive. Same as ``drives join``; prefer --invite-file over URL.
+
+    A URL on the command line lands in shell history and ``ps``, and its
+    fragment is the key (``#k=``) or the secret that fetches it (``#i=``).
+    """
+    _join(obj, _invite_url(url, invite_file), as_json)
+
+
+def _invite_url(url: str | None, invite_file: Path | None) -> str:
+    """The invite URL from exactly one source: argument, file, or environment.
+
+    Blank values do not count as a source, so an exported but empty
+    ``HIPPIUS_INVITE_URL`` neither supplies an invite nor conflicts with a file.
+    """
+    from_arg = (url or "").strip()
+    from_env = os.environ.get(ENV_INVITE_URL, "").strip()
+    given = [bool(from_arg), invite_file is not None, bool(from_env)]
+    if sum(given) != 1:
+        raise click.ClickException(
+            f"give the invite once: --invite-file FILE (or -), {ENV_INVITE_URL}, or a URL"
+        )
+    if invite_file is not None:
+        return _read_secret(invite_file)
+    return from_arg or from_env
+
+
+def _join(obj: Context, url: str, as_json: bool) -> None:
     account = _account(obj)
     with obj.client() as client:
         accepted = client.drives.accept(url, obj.master(), member_ss58=account)
+    row = {
+        "owner_ss58": accepted.owner_ss58,
+        "folder_hash": accepted.folder_hash,
+        "role": accepted.role,
+        "path_prefix": accepted.path_prefix,
+        "already_owner": accepted.already_owner,
+    }
+    if as_json:
+        click.echo(json.dumps(row, indent=2))
+        return
     click.echo(f"owner        {accepted.owner_ss58}")
     click.echo(f"folder_hash  {accepted.folder_hash}")
     click.echo(f"role         {accepted.role}")
@@ -876,6 +922,36 @@ def drives(ctx: click.Context, as_json: bool) -> None:
     if ctx.invoked_subcommand is not None:
         return
     _print_drives(ctx.obj, as_json)
+
+
+@drives.command("join")
+@click.argument("stray", nargs=-1, required=False, metavar="")
+@click.option(
+    "--invite-file",
+    type=click.Path(path_type=Path, allow_dash=True),
+    default=None,
+    help="Read the invite URL from this owner-only file, or - for stdin.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.pass_obj
+def drives_join(
+    obj: Context, stray: tuple[str, ...], invite_file: Path | None, as_json: bool
+) -> None:
+    """Join a shared drive from an invite, ``#i=`` or ``#k=``, drive or folder.
+
+    The invite comes from --invite-file, or from the HIPPIUS_INVITE_URL
+    environment variable; never from the command line. Prints the owner,
+    drive id, role, and, for a folder invite, the folder. The invite's key
+    is never printed.
+    """
+    if stray:
+        # Taken and refused here, without echoing it: click's own "unexpected
+        # extra argument" error would print the URL, key and all.
+        raise click.ClickException(
+            "drives join takes no URL argument (it would sit in shell history); "
+            "use --invite-file FILE or HIPPIUS_INVITE_URL"
+        )
+    _join(obj, _invite_url(None, invite_file), as_json)
 
 
 @drives.command("leave")

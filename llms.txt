@@ -28,7 +28,7 @@ The caller needs three things that belong together:
 - The account address that token belongs to
 - The recovery phrase for the Drive
 
-An agent with its own 12-word access key signs in without a browser: `pip install 'hippius-drive[login]'`, then `hippius-drive auth login --phrase-file FILE` (or `hippius_drive.auth.login(phrase)` in code). It saves the token and address to `~/.config/hippius-drive/config.toml` (0600) and prints neither. Keep the access key in an owner-only file, never on the command line.
+An agent with its own 12-word access key signs in without a browser: `pip install 'hippius-drive[login]'`, then `hippius-drive auth login --phrase-file FILE` (or `hippius_drive.auth.login(phrase)` in code). It saves the token and address to `~/.config/hippius-drive/config.toml` (0600) and prints neither. Keep the access key in an owner-only file, never on the command line. Join a shared drive the same way: `hippius-drive drives join --invite-file FILE` (the URL in an owner-only file, or `HIPPIUS_INVITE_URL`).
 
 The phrase never leaves the user's machine. Do not ask them to paste it into chat. Read it from their environment if they have already stored it there.
 
