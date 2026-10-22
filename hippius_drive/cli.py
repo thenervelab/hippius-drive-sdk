@@ -620,6 +620,8 @@ def invite_accept(obj: Context, url: str) -> None:
     click.echo(f"owner        {accepted.owner_ss58}")
     click.echo(f"folder_hash  {accepted.folder_hash}")
     click.echo(f"role         {accepted.role}")
+    if accepted.path_prefix:
+        click.echo(f"folder       {accepted.path_prefix}")
 
 
 @main.group(invoke_without_command=True)
@@ -641,13 +643,14 @@ def drives_leave(obj: Context, owner_ss58: str, folder_hash: str) -> None:
     account = _account(obj)
     with obj.client() as client:
         rows = client.drives.memberships(obj.master(), member_ss58=account)
-    phrase, owner, folder, role, label = _joined(rows, owner_ss58, folder_hash)
-    identity = Identity.for_shared_drive(
-        phrase,
-        owner_ss58=owner,
-        folder_hash=folder,
-        role=role,
-        label=label,
+    row = _joined(rows, owner_ss58, folder_hash)
+    build = Identity.for_folder_grant if row.path_prefix else Identity.for_shared_drive
+    identity = build(
+        row.phrase,
+        owner_ss58=row.owner,
+        folder_hash=row.folder,
+        role=row.role,
+        label=row.label,
     )
     token = _checked(obj.config.require_token)
     with Client(token=token, identity=identity, server_url=obj.config.server_url) as member:
@@ -693,6 +696,7 @@ def _drive_row(item: Any) -> dict[str, Any]:
         "role": item.role,
         "display_label": item.display_label,
         "frozen": item.frozen,
+        "path_prefix": item.path_prefix,
     }
 
 
@@ -710,11 +714,24 @@ def _folder_line(row: dict[str, Any]) -> str:
 def _drive_line(row: dict[str, Any]) -> str:
     frozen = "  frozen" if row["frozen"] else ""
     label = row["display_label"] or row["folder_hash"]
-    return f"{row['role']:<8}  {row['owner_ss58']}  {row['folder_hash']}  {label}{frozen}"
+    folder = f" / {row['path_prefix']}" if row.get("path_prefix") else ""
+    return f"{row['role']:<8}  {row['owner_ss58']}  {row['folder_hash']}  {label}{folder}{frozen}"
 
 
-def _joined(rows: Sequence[Any], owner: str, folder: str) -> tuple[str, str, str, str, str]:
-    """Return the phrase, owner, hash, role, and label for one joined drive."""
+@dataclass(frozen=True)
+class _Joined:
+    """One joined drive or folder grant, as ``drives leave`` needs it."""
+
+    phrase: str = field(repr=False)
+    owner: str
+    folder: str
+    role: str
+    label: str
+    path_prefix: str | None
+
+
+def _joined(rows: Sequence[Any], owner: str, folder: str) -> _Joined:
+    """Return the opened grant and the fields of one joined drive or folder grant."""
     for row in rows:
         if row.owner_ss58 != owner or row.folder_hash != folder:
             continue
@@ -723,7 +740,8 @@ def _joined(rows: Sequence[Any], owner: str, folder: str) -> tuple[str, str, str
             raise click.ClickException("this drive has no grant; it cannot be opened")
         label = row.display_label if isinstance(row.display_label, str) else ""
         role = row.role if isinstance(row.role, str) else ""
-        return phrase, owner, folder, role, label
+        prefix = row.path_prefix if isinstance(row.path_prefix, str) else None
+        return _Joined(phrase, owner, folder, role, label, prefix)
     raise click.ClickException("no membership for that owner and folder")
 
 

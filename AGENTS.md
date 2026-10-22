@@ -85,8 +85,9 @@ not in `__all__` — the CLI and the quickstart both import it.
 | Mint a folder-share link | `client.folder_shares.create(FolderShareSpec(prefix, name))` — fragment is the drive file key |
 | Revoke a folder share | `client.folder_shares.revoke(token_or_hash)` — list returns `token_hash` only |
 | Invite someone to this drive | `client.drives.create_invite(InviteSpec(folder_mnemonic, role="writer"))` |
-| Join a drive | `client.drives.accept(url, member_master, member_ss58=account)` — `#k=` or `#i=`; whole-drive invites only |
-| List joined drives | `client.drives.memberships(member_master, member_ss58=account)` |
+| Join a drive | `client.drives.accept(url, member_master, member_ss58=account)` — `#k=` or `#i=`, whole drive or one folder (`accepted.path_prefix`) |
+| Act in a granted folder | `Identity.for_folder_grant(accepted.folder_mnemonic, owner_ss58=..., folder_hash=..., role=...)` — never `for_shared_drive` for a folder invite |
+| List joined drives | `client.drives.memberships(member_master, member_ss58=account)` — folder grants follow, with `path_prefix` set |
 | Act as a member | `Identity.for_shared_drive(phrase, owner_ss58=..., folder_hash=..., role=...)` then `Client(token=member_token, identity=that)` |
 | Leave a drive | `member_client.drives.leave(member_account)` — always sends `?owner=` the drive owner |
 

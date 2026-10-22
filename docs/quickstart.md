@@ -224,6 +224,11 @@ member_identity = Identity.for_shared_drive(
 )
 ```
 
+A folder invite (`accepted.path_prefix` is set) seals the drive's file key
+rather than the owner's folder phrase. Build that identity with
+`Identity.for_folder_grant(...)`, same arguments; `for_shared_drive` would
+derive a different key. The server keeps the account inside that folder.
+
 `folder_hash` is the owner's id from the invite. It is not recomputed from a
 label the member invented. A reader cannot upload. Registering and unregistering
 the folder stay with the owner. The owner pays for bytes members write. Losing

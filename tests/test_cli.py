@@ -2,6 +2,7 @@ import ast
 import base64
 import json
 from pathlib import Path
+from typing import Any
 
 import blake3
 import httpx
@@ -9,7 +10,7 @@ import pytest
 import respx
 from click.testing import CliRunner, Result
 
-from hippius_drive import __version__, cli
+from hippius_drive import __version__, _links, cli
 from hippius_drive._transport import Transport
 from hippius_drive.cli import main
 from hippius_drive.client import Client
@@ -1030,11 +1031,21 @@ def test_drives_lists_memberships_without_the_phrase(env: dict[str, str]) -> Non
                         "display_label": "Docs",
                         "frozen": True,
                     }
-                ]
+                ],
+                "folder_grants": [
+                    {
+                        "owner_ss58": OWNER,
+                        "folder_hash": "0123456789abcdef",
+                        "path_prefix": "Clients/ACME",
+                        "grant_blob": "",
+                        "display_label": "Team",
+                    }
+                ],
             },
         )
     )
     output = run(["drives"], env).output
+    assert "Team / Clients/ACME" in output
     assert "Docs" in output
     assert "frozen" in output
     assert "writer" in output
@@ -1042,7 +1053,47 @@ def test_drives_lists_memberships_without_the_phrase(env: dict[str, str]) -> Non
     rows = json.loads(run(["drives", "--json"], env).output)
     assert rows[0]["display_label"] == "Docs"
     assert rows[0]["frozen"] is True
+    assert rows[0]["path_prefix"] is None
+    assert rows[1]["path_prefix"] == "Clients/ACME"
     assert "folder_mnemonic" not in rows[0]
+
+
+@respx.mock
+def test_drives_leave_works_on_a_folder_grant(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[str] = []
+    real = Identity.for_folder_grant
+
+    def spy(*args: Any, **kwargs: Any) -> Identity:
+        built.append(kwargs["folder_hash"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(Identity, "for_folder_grant", spy)
+    file_key_phrase = grant.phrase_from_entropy(bytes([0x44]) * 32)
+    monkeypatch.setattr(_links, "_open_one_grant", lambda *_args: file_key_phrase)
+    respx.get(f"{BASE}/v1/drive-memberships").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "folder_grants": [
+                    {
+                        "owner_ss58": OWNER,
+                        "folder_hash": FOLDER,
+                        "path_prefix": "Work",
+                        "grant_blob": "sealed",
+                    }
+                ]
+            },
+        )
+    )
+    route = respx.delete(f"{BASE}/v1/drives/{FOLDER}/members/{SS58}").mock(
+        return_value=httpx.Response(204)
+    )
+    result = run(["drives", "leave", OWNER, FOLDER], env)
+    assert result.exit_code == 0, result.output
+    assert built == [FOLDER]
+    assert route.calls.last.request.url.params["owner"] == OWNER
 
 
 @respx.mock
@@ -1098,6 +1149,9 @@ def test_invite_accept_prints_the_drive_and_not_the_phrase(env: dict[str, str]) 
     phrase = kdf.derive_folder_mnemonic(MASTER, "default")
     entropy = kdf.folder_entropy(MASTER, "default")
     url = grant.invite_url(CONSOLE, "joinme", entropy)
+    respx.get(f"{BASE}/v1/drive-invites/joinme/meta").mock(
+        return_value=httpx.Response(200, json={"owner_ss58": OWNER, "folder_hash": FOLDER})
+    )
     respx.post(f"{BASE}/v1/drive-invites/joinme/accept").mock(
         return_value=httpx.Response(
             200,
@@ -1114,8 +1168,29 @@ def test_invite_accept_prints_the_drive_and_not_the_phrase(env: dict[str, str]) 
     assert f"owner        {OWNER}" in result.output
     assert f"folder_hash  {FOLDER}" in result.output
     assert "role         writer" in result.output
+    assert "folder" not in result.output.replace("folder_hash", "")
     assert phrase not in result.output
     assert MASTER not in result.output
+
+
+@respx.mock
+def test_invite_accept_names_the_folder_of_a_folder_invite(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_links, "accept_grant", lambda *_args: "e30=")
+    url = grant.invite_url(CONSOLE, "joinme", bytes([0x44]) * 32)
+    respx.get(f"{BASE}/v1/drive-invites/joinme/meta").mock(
+        return_value=httpx.Response(
+            200, json={"owner_ss58": OWNER, "folder_hash": FOLDER, "path_prefix": "Work"}
+        )
+    )
+    accepted = {"owner_ss58": OWNER, "folder_hash": FOLDER, "role": "reader", "path_prefix": "Work"}
+    respx.post(f"{BASE}/v1/drive-invites/joinme/accept").mock(
+        return_value=httpx.Response(200, json=accepted)
+    )
+    result = run(["invite", "accept", url], env)
+    assert result.exit_code == 0, result.output
+    assert "folder       Work" in result.output
 
 
 @respx.mock
