@@ -35,6 +35,15 @@ classifiers = [
   "Typing :: Typed",
 ]
 
+[project.optional-dependencies]
+# Access-key login (sr25519 + secp256k1). Native wheels; kept out of the core
+# install so file storage does not pull a Rust or C extension it never uses.
+login = [
+  "py-sr25519-bindings==0.2.4",
+  "coincurve==21.0.0",
+  "pycryptodome==4.1.0",
+]
+
 [project.scripts]
 hippius-drive = "hippius_drive.cli:run"
 
@@ -52,6 +61,9 @@ dev = [
   "pip-audit==2.10.1",
   "pytest-cov==7.1.0",
   "anyio==4.15.1",
+  "py-sr25519-bindings==0.2.4",
+  "coincurve==21.0.0",
+  "pycryptodome==4.1.0",
 ]
 
 [tool.hatch.version]

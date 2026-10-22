@@ -8,7 +8,10 @@ one record per line, with ``--json`` on the read commands for scripts.
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +20,7 @@ from typing import Any
 import click
 
 from hippius_drive import FileShareSpec, FolderShareSpec, InviteSpec, __version__, _config, errors
+from hippius_drive import auth as api_auth
 from hippius_drive._config import Config
 from hippius_drive.client import Client
 from hippius_drive.crypto import kdf, mnemonic_store
@@ -109,6 +113,62 @@ def _checked(getter: Any) -> Any:
         raise click.ClickException(str(exc)) from exc
 
 
+_SECRET_FILE_MAX = 64 * 1024
+
+
+def _read_secret(path: Path) -> str:
+    """Read a phrase or link from a file, or from stdin for ``-``. Never echoed.
+
+    The file is opened once, without following a symlink, and judged by what
+    was opened: it must be a regular file, and on POSIX one other users cannot
+    read. On a terminal, ``-`` prompts with echo off instead of reading raw.
+    """
+    if str(path) == "-":
+        if sys.stdin.isatty():
+            return str(click.prompt("Secret", hide_input=True)).strip()
+        return sys.stdin.read(_SECRET_FILE_MAX).strip()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        # A path that is not there may be the secret itself, typed where the
+        # file name belongs; only an existing path is named in the error.
+        shown = str(path) if os.path.lexists(path) else "the given path"
+        raise click.ClickException(f"cannot read {shown}: {exc.strerror}") from exc
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(fd)
+        raise click.ClickException(f"{path} is not a regular file")
+    if os.name == "posix" and info.st_mode & 0o077:
+        os.close(fd)
+        raise click.ClickException(f"{path} is readable by other users; chmod 600 it first")
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read(_SECRET_FILE_MAX).strip()
+
+
+def _write_secret(path: Path, value: str) -> None:
+    """Write a secret to an owner-only file (0600 from creation), atomically.
+
+    A symlink at ``path`` is refused rather than followed, so the token can
+    neither land somewhere else nor sit briefly in a file others can read.
+    """
+    if path.is_symlink():
+        raise click.ClickException(f"{path} is a symlink; give the real path")
+    try:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".token-")
+    except OSError as exc:
+        raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+        os.replace(tmp, path)
+    except BaseException as exc:
+        Path(tmp).unlink(missing_ok=True)
+        if isinstance(exc, OSError):
+            raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
+        raise
+
+
 def _prompt_password() -> str:
     if not sys.stdin.isatty():
         raise click.ClickException(
@@ -189,19 +249,35 @@ def main(
 
 
 @main.command()
-@click.option("--mnemonic", default=None, help="Import this phrase instead of generating one.")
+@click.option(
+    "--mnemonic",
+    default=None,
+    help="Import this phrase. It lands in shell history; prefer --phrase-file.",
+)
+@click.option(
+    "--phrase-file",
+    type=click.Path(path_type=Path, allow_dash=True),
+    default=None,
+    help="Import the phrase from this owner-only file, or - for stdin.",
+)
 @click.option("--force", is_flag=True, help="Overwrite an existing mnemonic file.")
 @click.pass_obj
-def init(obj: Context, mnemonic: str | None, force: bool) -> None:
+def init(obj: Context, mnemonic: str | None, phrase_file: Path | None, force: bool) -> None:
     """Create or import a master mnemonic and store it encrypted.
 
-    The phrase is printed once. It is the only way to decrypt your files: the
-    server never sees it, and nobody can recover it for you.
+    A generated phrase is printed once. It is the only way to decrypt your
+    files: the server never sees it, and nobody can recover it for you. An
+    imported phrase is never printed. For an access-key account, import the
+    access key itself: the console uses it as the Drive phrase too.
     """
+    if mnemonic is not None and phrase_file is not None:
+        raise click.ClickException("pass --mnemonic or --phrase-file, not both")
     path = obj.config.mnemonic_file
     if path.exists() and not force:
         raise click.ClickException(f"{path} already exists; pass --force to replace it")
 
+    if phrase_file is not None:
+        mnemonic = _read_secret(phrase_file)
     phrase = mnemonic if mnemonic is not None else kdf.generate_master_mnemonic()
     try:
         kdf.folder_keys(phrase)
@@ -219,6 +295,68 @@ def init(obj: Context, mnemonic: str | None, force: bool) -> None:
     if mnemonic is None:
         click.echo("Recovery phrase (store it offline; it is shown only once):")
         click.echo(phrase)
+
+
+@main.group()
+def auth() -> None:
+    """Sign in to the Hippius API with an access key, no browser."""
+
+
+@auth.command("login")
+@click.option(
+    "--phrase-file",
+    type=click.Path(path_type=Path, allow_dash=True),
+    default=None,
+    help="Plain-text access key in an owner-only file, or - for stdin. "
+    "Default: unlock the encrypted mnemonic file.",
+)
+@click.option(
+    "--api",
+    "api_url",
+    envvar=_config.ENV_API_URL,
+    default=api_auth.DEFAULT_API_URL,
+    show_default=True,
+    help="Hippius API origin.",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Write the token to this owner-only file instead of the config file.",
+)
+@click.pass_obj
+def auth_login(
+    obj: Context, phrase_file: Path | None, api_url: str, token_file: Path | None
+) -> None:
+    """Sign in with an access key and keep the API token for later commands.
+
+    Signs the API's challenge with the two keys the access key stands for,
+    the same as the console's access-key sign-in; the first sign-in creates
+    the account. The token and account go to the config file (0600), or the
+    token to --token-file. Neither the phrase nor the token is printed.
+    """
+    phrase = _read_secret(phrase_file) if phrase_file is not None else obj.master()
+    try:
+        session = api_auth.login(phrase, api_url=api_url)
+    except ImportError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if token_file is not None:
+        _write_secret(token_file, session.token)
+        # Drop a token the config held for another account: it would pair
+        # with this account and fail every call.
+        dropped: dict[str, str | None] = {"account_ss58": session.account_ss58, "token": None}
+        saved = _checked(lambda: _config.save(dropped))
+        where = token_file
+    else:
+        updates = {"token": session.token, "account_ss58": session.account_ss58}
+        saved = _checked(lambda: _config.save(updates))
+        where = saved
+    click.echo(f"account   {session.account_ss58}")
+    click.echo(f"username  {session.username}")
+    click.echo(f"created   {'yes' if session.is_new else 'no'}")
+    click.echo(f"token     saved to {where}")
+    if saved != where:
+        click.echo(f"account   saved to {saved}")
 
 
 @main.command()

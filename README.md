@@ -15,8 +15,10 @@ Python 3.10 to 3.13.
 
 ## Quickstart
 
-You need two things from the [Hippius console](https://console.hippius.com): an
-API token and the account address it belongs to. You also need a recovery
+You need an API token and the account address it belongs to, from the
+[Hippius console](https://console.hippius.com), or, for an access-key account,
+from `hippius_drive.auth.login(access_key)` / `hippius-drive auth login` with
+no browser (`pip install 'hippius-drive[login]'`). You also need a recovery
 phrase, which the SDK can generate for you and which never leaves your machine.
 
 ```python
