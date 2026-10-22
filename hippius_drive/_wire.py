@@ -331,6 +331,24 @@ class RequestBuilders:
         )
 
     @staticmethod
+    def register_folder_entries(ss58: str, folder_hash: str, paths: list[str]) -> Request:
+        """Build ``POST /register_folder_entries``.
+
+        Args:
+            ss58: The account address; the drive owner on a shared drive.
+            folder_hash: The drive.
+            paths: Directory paths, at most 500.
+
+        Returns:
+            The request.
+        """
+        return Request(
+            "POST",
+            "/register_folder_entries",
+            json={"ss58_address": ss58, "folder_hash": folder_hash, "relative_paths": paths},
+        )
+
+    @staticmethod
     def list_folder_entries(ss58: str, folder_hash: str) -> Request:
         """Build ``GET /list_folder_entries/{ss58}/{folder_hash}``.
 

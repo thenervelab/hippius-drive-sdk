@@ -24,7 +24,7 @@ from hippius_drive.crypto import (
     sharing,
 )
 from hippius_drive.identity import Identity
-from tests.helpers import multipart_parts
+from tests.helpers import manifest_from, multipart_parts
 
 BASE = "https://example.test"
 MASTER = " ".join(["abandon"] * 23 + ["art"])
@@ -1244,3 +1244,93 @@ def test_drives_leave_uses_the_opened_grant(env: dict[str, str], sealed_grant: s
     assert route.calls.last.request.url.params["owner"] == OWNER
     phrase = kdf.derive_folder_mnemonic(MASTER, "default")
     assert phrase not in result.output
+
+
+UPLOADED = {"Success": {"upload_id": "u", "timestamp": 1, "revision_id": [2] * 32}}
+
+
+def _browse_with(files: list[dict[str, Any]], path: str = "") -> respx.Route:
+    return respx.get(f"{BASE}/browse/{SS58}/{FOLDER}").mock(
+        return_value=httpx.Response(200, json={"Success": {"folders": [], "files": files}})
+    )
+
+
+def _local(tmp_path: Path) -> Path:
+    local = tmp_path / "a.bin"
+    local.write_bytes(b"hello")
+    return local
+
+
+@respx.mock
+def test_put_overwrite_quotes_the_revision_it_read(env: dict[str, str], tmp_path: Path) -> None:
+    browse = _browse_with([{**FILE_JSON, "revision_seq": 4, "revision_id": [8] * 32}])
+    upload = respx.post(f"{BASE}/upload").mock(return_value=httpx.Response(200, json=UPLOADED))
+    result = run(["put", str(_local(tmp_path)), "a.bin", "--overwrite"], env)
+    assert result.exit_code == 0, result.output
+    assert "replaced     yes" in result.output
+    manifest = manifest_from(upload.calls.last.request)
+    assert manifest["base_revision_id"] == [8] * 32
+    assert manifest["revision_seq"] == 5
+    assert browse.calls.last.request.url.params.get("path", "") == ""
+
+
+@respx.mock
+def test_put_overwrite_of_a_missing_file_is_a_new_file(env: dict[str, str], tmp_path: Path) -> None:
+    _browse_with([])
+    upload = respx.post(f"{BASE}/upload").mock(return_value=httpx.Response(200, json=UPLOADED))
+    result = run(["put", str(_local(tmp_path)), "a.bin", "--overwrite"], env)
+    assert result.exit_code == 0, result.output
+    assert "replaced     no, new file" in result.output
+    assert manifest_from(upload.calls.last.request).get("base_revision_id") is None
+
+
+def _conflict() -> httpx.Response:
+    return httpx.Response(
+        409, json={"Conflict": {"error": "conflict", "message": "File already exists on server"}}
+    )
+
+
+@respx.mock
+def test_put_onto_an_existing_file_exits_3_and_names_overwrite(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    respx.post(f"{BASE}/upload").mock(return_value=_conflict())
+    result = run(["put", str(_local(tmp_path)), "a.bin"], env)
+    assert result.exit_code == 3
+    assert "already exists; pass --overwrite" in result.output
+
+
+@respx.mock
+def test_put_overwrite_that_loses_a_race_exits_3(env: dict[str, str], tmp_path: Path) -> None:
+    _browse_with([FILE_JSON])
+    respx.post(f"{BASE}/upload").mock(return_value=_conflict())
+    result = run(["put", str(_local(tmp_path)), "a.bin", "--overwrite"], env)
+    assert result.exit_code == 3
+    assert "changed since it was read" in result.output
+
+
+def test_put_overwrite_refuses_an_explicit_base(env: dict[str, str], tmp_path: Path) -> None:
+    args = ["put", str(_local(tmp_path)), "a.bin", "--overwrite", "--base-revision", "ab" * 32]
+    result = run(args, env)
+    assert result.exit_code != 0
+    assert "drop --base-revision" in result.output
+
+
+@respx.mock
+def test_mkdir_registers_the_named_directories(env: dict[str, str]) -> None:
+    route = respx.post(f"{BASE}/register_folder_entries").mock(
+        return_value=httpx.Response(200, json={"Success": {"status": "registered"}})
+    )
+    result = run(["mkdir", "docs", "docs/2026", "docs"], env)
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "registered"
+    assert json.loads(route.calls.last.request.content) == {
+        "ss58_address": SS58,
+        "folder_hash": FOLDER,
+        "relative_paths": ["docs", "docs/2026"],
+    }
+
+
+def test_mkdir_refuses_a_bad_path(env: dict[str, str]) -> None:
+    result = run(["mkdir", "../escape"], env)
+    assert result.exit_code == 1

@@ -12,7 +12,7 @@ from hippius_drive import errors
 from hippius_drive._transport import AsyncTransport, Transport
 from hippius_drive._upload import TRANSPORT_CHUNK
 from hippius_drive.client import AsyncClient, Client
-from hippius_drive.crypto import file_cipher, hashes
+from hippius_drive.crypto import file_cipher, hashes, kdf
 from hippius_drive.identity import Identity, tos_text
 from hippius_drive.models import Manifest
 from tests.helpers import multipart_parts
@@ -498,3 +498,84 @@ def test_async_client_reports_its_server_url(identity: Identity) -> None:
     client = AsyncClient(token="tok", identity=identity, transport=AsyncTransport(BASE, "tok"))
     assert client.server_url == BASE
     assert client.transport.base_url == BASE
+
+
+def _page(files: list[dict[str, object]], *, has_more: bool = False) -> httpx.Response:
+    return httpx.Response(
+        200, json={"Success": {"folders": [], "files": files, "has_more": has_more}}
+    )
+
+
+@respx.mock
+def test_lookup_reads_the_parent_directory_and_pages(client: Client) -> None:
+    other = {**LOOKUP_FILE, "path_hash": [1] * 32, "relative_path": "work/other.bin"}
+    target = {**LOOKUP_FILE, "path_hash": list(hashes.path_hash("work/a.bin"))}
+    route = respx.get(url__regex=r".*/browse/.*").mock(
+        side_effect=[_page([other], has_more=True), _page([target])]
+    )
+    found = client.files.lookup("work/a.bin")
+    assert found is not None
+    assert found.revision_seq == 3
+    assert route.calls[0].request.url.params["path"] == "work"
+    assert route.calls[1].request.url.params["offset"] == "1"
+
+
+@respx.mock
+def test_lookup_of_a_missing_file_is_none(client: Client) -> None:
+    respx.get(url__regex=r".*/browse/.*").mock(return_value=_page([]))
+    assert client.files.lookup("a.bin") is None
+
+
+def test_lookup_refuses_a_bad_path(client: Client) -> None:
+    with pytest.raises(ValueError):
+        client.files.lookup("../a.bin")
+
+
+@respx.mock
+def test_make_dirs_sends_each_path_once(client: Client) -> None:
+    route = respx.post(url__regex=r".*/register_folder_entries$").mock(
+        return_value=httpx.Response(200, json={"Success": {"status": "registered"}})
+    )
+    assert client.folders.make_dirs(["docs", "docs", "docs/2026"]).status == "registered"
+    assert json.loads(route.calls.last.request.content)["relative_paths"] == ["docs", "docs/2026"]
+
+
+def test_make_dirs_refuses_empty_oversized_and_reader_calls(client: Client) -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        client.folders.make_dirs([])
+    with pytest.raises(ValueError, match="500"):
+        client.folders.make_dirs([f"d{i}" for i in range(501)])
+    reader = Identity.for_shared_drive(
+        kdf.derive_folder_mnemonic(MASTER, "default"),
+        owner_ss58=SS58,
+        folder_hash="37a8eec1ce19687d",
+        role="reader",
+    )
+    member = Client(token="t", identity=reader, transport=Transport(BASE, "t"))
+    with pytest.raises(ValueError, match="reader"):
+        member.folders.make_dirs(["docs"])
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_the_async_client_looks_up_and_makes_dirs() -> None:
+    identity = Identity.from_master(MASTER, "default", account_ss58=SS58)
+    aclient = AsyncClient(token="t", identity=identity, transport=AsyncTransport(BASE, "t"))
+    target = {**LOOKUP_FILE, "path_hash": list(hashes.path_hash("a.bin"))}
+    respx.get(url__regex=r".*/browse/.*").mock(return_value=_page([target]))
+    respx.post(url__regex=r".*/register_folder_entries$").mock(
+        return_value=httpx.Response(200, json={"Success": {"status": "registered"}})
+    )
+    assert (await aclient.files.lookup("a.bin")) is not None
+    assert (await aclient.files.lookup("b.bin")) is None
+    assert (await aclient.folders.make_dirs(["docs"])).status == "registered"
+    await aclient.aclose()
+
+
+LOOKUP_FILE: dict[str, object] = {
+    "salted_hash": [7] * 32,
+    "size_bytes": 5,
+    "revision_seq": 3,
+    "revision_id": [9] * 32,
+    "relative_path": "work/a.bin",
+}

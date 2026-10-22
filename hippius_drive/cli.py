@@ -341,22 +341,78 @@ def _ls_line(row: dict[str, Any]) -> str:
     return f"{line}  (by {uploader})" if uploader else line
 
 
+class ConflictExit(click.ClickException):
+    """A write lost to the server's current revision. Exit code 3, so scripts can tell."""
+
+    exit_code = 3
+
+
 @main.command()
 @click.argument("local", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("remote")
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Replace REMOTE if it exists, quoting the revision just read. A write "
+    "that lands in between still fails rather than being clobbered.",
+)
 @click.option("--base-revision", default=None, help="Hex revision this write replaces.")
 @click.option("--revision-seq", type=int, default=None, help="Current revision_seq plus one.")
 @click.pass_obj
 def put(
-    obj: Context, local: Path, remote: str, base_revision: str | None, revision_seq: int | None
+    obj: Context,
+    local: Path,
+    remote: str,
+    overwrite: bool,
+    base_revision: str | None,
+    revision_seq: int | None,
 ) -> None:
-    """Encrypt and upload LOCAL to the folder-relative path REMOTE."""
+    """Encrypt and upload LOCAL to the folder-relative path REMOTE.
+
+    An existing REMOTE is never replaced silently: without --overwrite (or an
+    explicit --base-revision) the upload fails with exit code 3. With it, the
+    write is a compare-and-swap on the revision it read, so two writers racing
+    on one path cannot clobber each other; the loser exits 3 and can rerun.
+    """
+    if overwrite and (base_revision or revision_seq is not None):
+        raise click.ClickException("--overwrite looks the revision up; drop --base-revision")
     base = bytes.fromhex(base_revision) if base_revision else None
     with obj.client() as client:
-        result = client.files.put(local, remote, base_revision_id=base, revision_seq=revision_seq)
+        if overwrite:
+            current = client.files.lookup(remote)
+            if current is not None:
+                base, revision_seq = current.revision_id, current.revision_seq + 1
+        try:
+            result = client.files.put(
+                local, remote, base_revision_id=base, revision_seq=revision_seq
+            )
+        except errors.Conflict as exc:
+            raise ConflictExit(_conflict_message(remote, replacing=base is not None)) from exc
         file_id = client.files.file_id(remote)
     click.echo(f"file_id      {file_id}")
     click.echo(f"revision_id  {result.revision_id.hex()}")
+    if overwrite:
+        click.echo(f"replaced     {'yes' if base is not None else 'no, new file'}")
+
+
+def _conflict_message(remote: str, *, replacing: bool) -> str:
+    if replacing:
+        return f"{remote} changed since it was read; rerun to replace the newer version"
+    return f"{remote} already exists; pass --overwrite to replace it"
+
+
+@main.command()
+@click.argument("paths", nargs=-1, required=True)
+@click.pass_obj
+def mkdir(obj: Context, paths: tuple[str, ...]) -> None:
+    """Create directories, so they show in listings while still empty.
+
+    Existing directories are fine. A file can also be uploaded straight into a
+    directory that does not exist yet; mkdir is for empty ones.
+    """
+    with obj.client() as client:
+        result = client.folders.make_dirs(list(paths))
+    click.echo(result.status)
 
 
 @main.command()

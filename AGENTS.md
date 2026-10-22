@@ -66,7 +66,8 @@ not in `__all__` — the CLI and the quickstart both import it.
 | Delete a folder and every file in it | `client.folders.unregister()` — irreversible |
 | Upload a new file | `client.files.put(path, "dir/name.ext")` |
 | Upload bytes | `client.files.put_bytes(data, "dir/name.ext")` |
-| Replace an existing file | `put(..., base_revision_id=entry.revision_id, revision_seq=entry.revision_seq + 1)` |
+| Replace an existing file | `entry = client.files.lookup(path)`, then `put(..., base_revision_id=entry.revision_id, revision_seq=entry.revision_seq + 1)`; CLI `put --overwrite` |
+| Create empty directories | `client.folders.make_dirs(["docs", "docs/2026"])`; CLI `mkdir` |
 | Download to disk | `client.files.get(file_id, dest)` |
 | Download to memory | `client.files.get_bytes(file_id)` — not for large files |
 | Path → id, no network | `client.files.file_id("dir/name.ext")` |
@@ -204,7 +205,9 @@ hippius-drive drives
 hippius-drive drives leave OWNER_SS58 FOLDER_HASH
 ```
 
-Replacing via CLI still needs `--base-revision` and `--revision-seq`. Share and
+Replacing via CLI: `put --overwrite` (compare-and-swap on the revision it
+reads; a lost race and a plain put onto an existing path both exit 3), or
+explicit `--base-revision` and `--revision-seq`. Share and
 invite commands print the URL once; that URL is the key. Failures print one
 line and exit 1 — no traceback. Full flag list: [docs/cli.md](docs/cli.md).
 

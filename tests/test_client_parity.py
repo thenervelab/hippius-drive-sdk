@@ -90,6 +90,11 @@ PARITY_CASES: list[tuple[str, Callable[[Client], Any], Callable[[AsyncClient], A
     ),
     ("unregister_folder", lambda c: c.folders.unregister(), lambda c: c.folders.unregister()),
     ("folder_entries", lambda c: c.folders.entries(), lambda c: c.folders.entries()),
+    (
+        "make_dirs",
+        lambda c: c.folders.make_dirs(["docs", "docs/2026"]),
+        lambda c: c.folders.make_dirs(["docs", "docs/2026"]),
+    ),
     ("get_state", lambda c: c.files.state(offset=5, limit=7), lambda c: c.files.state(5, 7)),
     (
         "browse",

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
 from types import TracebackType
@@ -220,6 +220,19 @@ class FolderOps:
         """List the registered empty-directory paths for this folder."""
         return self._client.run(_ops.list_folder_entries(self._client.identity))
 
+    def make_dirs(self, paths: Sequence[str]) -> models.RegisterFolderResult:
+        """Create directories, so they show in listings while still empty.
+
+        Existing directories are a no-op. Readers cannot.
+
+        Args:
+            paths: Drive-relative directory paths, at most 500.
+
+        Returns:
+            ``registered`` on success.
+        """
+        return self._client.run(_ops.register_folder_entries(self._client.identity, paths))
+
 
 class SummaryOps:
     """Account-level storage summaries.
@@ -317,6 +330,29 @@ class FileOps:
         """
         opts = _browse_options(path, options)
         return self._client.run(_ops.browse(self._client.identity, opts, offset, limit))
+
+    def lookup(self, relative_path: str) -> models.RemoteFileEntry | None:
+        """Return the file at ``relative_path`` as the server has it, or None.
+
+        Walks the parent directory's listing, so it reads only that level and
+        works for a folder-grant member. The entry carries the ``revision_id``
+        and ``revision_seq`` a replacement must quote. A row with no plaintext
+        path does not appear in listings and reads as absent here.
+
+        Args:
+            relative_path: The file's path in the folder.
+
+        Returns:
+            The entry, or None when no listed file has that path.
+
+        Raises:
+            ValueError: If ``relative_path`` is not a clean relative path.
+        """
+        wanted = self.file_id(relative_path)
+        for entry in self.iter_browse(_parent_dir(relative_path)):
+            if isinstance(entry, models.RemoteFileEntry) and entry.file_id == wanted:
+                return entry
+        return None
 
     def iter_browse(
         self,
@@ -741,6 +777,10 @@ class AsyncFolderOps:
         """List the registered empty-directory paths for this folder."""
         return await self._client.run(_ops.list_folder_entries(self._client.identity))
 
+    async def make_dirs(self, paths: Sequence[str]) -> models.RegisterFolderResult:
+        """Async twin of :meth:`FolderOps.make_dirs`."""
+        return await self._client.run(_ops.register_folder_entries(self._client.identity, paths))
+
 
 class AsyncSummaryOps:
     """Account-level storage summaries, async."""
@@ -830,6 +870,14 @@ class AsyncFileOps:
         """
         opts = _browse_options(path, options)
         return await self._client.run(_ops.browse(self._client.identity, opts, offset, limit))
+
+    async def lookup(self, relative_path: str) -> models.RemoteFileEntry | None:
+        """Async twin of :meth:`FileOps.lookup`."""
+        wanted = self.file_id(relative_path)
+        async for entry in self.iter_browse(_parent_dir(relative_path)):
+            if isinstance(entry, models.RemoteFileEntry) and entry.file_id == wanted:
+                return entry
+        return None
 
     async def iter_browse(
         self,
@@ -1145,3 +1193,9 @@ class AsyncClient:
     ) -> None:
         """Close the connection pool on the way out."""
         await self.aclose()
+
+
+def _parent_dir(relative_path: str) -> str:
+    """The directory a file's listing lives in; "" for the folder root."""
+    normalized = hashes.normalize_relative_path(relative_path)
+    return normalized.rpartition("/")[0]
