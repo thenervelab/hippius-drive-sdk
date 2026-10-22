@@ -252,6 +252,8 @@ def test_ls_names_who_added_each_file(env: dict[str, str]) -> None:
     rows = json.loads(run(["ls", "--json"], env).output)
     assert rows[0]["uploaded_by_name"] == "agent-jack"
     assert rows[0]["uploaded_by"] == "5Fmember"
+    assert rows[0]["uploaded_by_email"] is None
+    assert rows[2]["uploaded_by"] is None
 
 
 @respx.mock

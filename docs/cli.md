@@ -107,7 +107,8 @@ which lists everything.
 On a shared drive, each file line ends with who added it: `(by NAME)`, or
 `(by SS58)` when the uploader's account has no display name. Files that
 predate attribution have no suffix. `--json` carries `uploaded_by`,
-`uploaded_by_name`, and `uploaded_by_email` as the server sent them.
+`uploaded_by_name`, and `uploaded_by_email`, each `null` when the server
+omitted it.
 
 ## Search and quota
 
