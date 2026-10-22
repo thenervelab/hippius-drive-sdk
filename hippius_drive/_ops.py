@@ -712,7 +712,7 @@ def seal_drive_invite(
 
 def put_invite_link_envelope(
     folder_hash: str, invite_id: str, body: dict[str, str], owner: str | None
-) -> Op[None]:
+) -> Op[models.StoredEnvelope]:
     """Store a ``#i=`` invite's envelope. Without it the link never opens.
 
     Args:
@@ -722,7 +722,7 @@ def put_invite_link_envelope(
         owner: Set when a manager mints on someone else's drive.
     """
     request = build.put_invite_link_envelope(folder_hash, invite_id, body, owner)
-    return Op(request, _ignored)
+    return Op(request, _parser(models.StoredEnvelope))
 
 
 def list_drive_invites(folder_hash: str, owner: str | None) -> Op[models.DriveInvites]:

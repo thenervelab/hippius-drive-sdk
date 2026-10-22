@@ -371,7 +371,9 @@ async def test_invite_mint_agrees_across_clients(identity: Identity) -> None:
         return_value=httpx.Response(200, json={"invite_token": token, "invite_id": invite_id})
     )
     sealed = respx.put(url__regex=r".*/sealed-token$").mock(return_value=httpx.Response(204))
-    stored = respx.put(url__regex=r".*/link-envelope$").mock(return_value=httpx.Response(200))
+    stored = respx.put(url__regex=r".*/link-envelope$").mock(
+        return_value=httpx.Response(200, json={"stored": True})
+    )
     spec = InviteSpec(kdf.derive_folder_mnemonic(MASTER, "default"), role="manager", max_uses=3)
 
     with Client(token="tok", identity=identity, transport=Transport(BASE, "tok")) as client:

@@ -880,6 +880,16 @@ class InviteMint(_Wire):
     invite_id: str | None = None
 
 
+class StoredEnvelope(_Wire):
+    """``PUT .../link-envelope``: ``{"stored": true}`` when the pair is stored.
+
+    Attributes:
+        stored: True once the server holds this exact envelope.
+    """
+
+    stored: bool = False
+
+
 class InviteMeta(_Wire):
     """Anonymous preview of an invite, shown before the recipient accepts.
 
@@ -1099,8 +1109,8 @@ class CreatedInvite:
         invite_id: Blake3 hex of the token.
     """
 
-    invite_token: str
-    invite_url: str
+    invite_token: str = field(repr=False)
+    invite_url: str = field(repr=False)
     invite_id: str
 
 

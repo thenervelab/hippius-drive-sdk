@@ -27,6 +27,7 @@ from hippius_drive.errors import (
     ServerError,
 )
 from hippius_drive.identity import Identity
+from hippius_drive.models import CreatedInvite
 
 BASE = "https://example.test"
 MASTER = " ".join(["abandon"] * 23 + ["art"])
@@ -457,10 +458,13 @@ def _mock_link_mint(*, store_status: int = 200) -> tuple[respx.Route, respx.Rout
         return_value=httpx.Response(200, json={"invite_token": TOKEN, "invite_id": INVITE_ID})
     )
     respx.put(url__regex=r".*/sealed-token(\?.*)?$").mock(return_value=httpx.Response(204))
+    answer = (
+        {"stored": True}
+        if store_status == 200
+        else {"error": "link_envelope_already_set", "message": "no"}
+    )
     stored = respx.put(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}/link-envelope").mock(
-        return_value=httpx.Response(
-            store_status, json={"error": "link_envelope_already_set", "message": "no"}
-        )
+        return_value=httpx.Response(store_status, json=answer)
     )
     return mint, stored
 
@@ -516,15 +520,58 @@ def test_a_failed_revoke_still_raises_the_store_error(client: Client) -> None:
 
 
 @respx.mock
-def test_an_invite_id_that_is_not_the_token_hash_is_refused(client: Client) -> None:
+def test_an_invite_id_that_is_not_the_token_hash_is_refused_and_revoked(client: Client) -> None:
     respx.get(f"{BASE}/v1/capabilities").mock(
         return_value=httpx.Response(200, json={"drive_invite_link_envelopes": True})
     )
     respx.post(f"{BASE}/v1/drive-invites").mock(
         return_value=httpx.Response(200, json={"invite_token": TOKEN, "invite_id": "0" * 64})
     )
+    revoke = respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{'0' * 64}").mock(
+        return_value=httpx.Response(204)
+    )
     with pytest.raises(InvalidResponse, match="blake3"):
         client.drives.create_invite(InviteSpec(_phrase()))
+    assert revoke.called
+
+
+@respx.mock
+def test_an_unconfirmed_envelope_store_is_refused_and_revoked(client: Client) -> None:
+    _mock_link_mint()
+    respx.put(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}/link-envelope").mock(
+        return_value=httpx.Response(200, json={"stored": False})
+    )
+    revoke = respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}").mock(
+        return_value=httpx.Response(204)
+    )
+    with pytest.raises(InvalidResponse, match="did not confirm"):
+        client.drives.create_invite(InviteSpec(_phrase()))
+    assert revoke.called
+
+
+@respx.mock
+def test_a_mint_without_an_invite_id_is_revoked_by_the_token_hash(client: Client) -> None:
+    respx.get(f"{BASE}/v1/capabilities").mock(
+        return_value=httpx.Response(200, json={"drive_invite_link_envelopes": True})
+    )
+    respx.post(f"{BASE}/v1/drive-invites").mock(
+        return_value=httpx.Response(200, json={"invite_token": TOKEN})
+    )
+    respx.put(url__regex=r".*/sealed-token(\?.*)?$").mock(return_value=httpx.Response(204))
+    respx.put(url__regex=r".*/link-envelope$").mock(return_value=httpx.Response(200, json={}))
+    revoke = respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}").mock(
+        return_value=httpx.Response(204)
+    )
+    with pytest.raises(InvalidResponse):
+        client.drives.create_invite(InviteSpec(_phrase()))
+    assert revoke.called
+
+
+def test_an_invite_keeps_its_secrets_out_of_repr() -> None:
+    spec = InviteSpec(_phrase())
+    assert _phrase() not in repr(spec)
+    created = CreatedInvite(TOKEN, _link_url(), INVITE_ID)
+    assert TOKEN not in repr(created) and "#i=" not in repr(created)
 
 
 @respx.mock

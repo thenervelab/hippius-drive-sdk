@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import math
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from tempfile import SpooledTemporaryFile
 from typing import IO, Any
 
@@ -37,6 +37,7 @@ from hippius_drive.models import (
     InviteMint,
     MintedShare,
     ShareTtl,
+    StoredEnvelope,
 )
 
 DEFAULT_CONSOLE = "https://console.hippius.com"
@@ -100,7 +101,7 @@ class InviteSpec:
         console_base_url: Origin the invite URL is built against.
     """
 
-    folder_mnemonic: str
+    folder_mnemonic: str = field(repr=False)
     role: str = "writer"
     expires_in_secs: int | None = None
     max_uses: int | None = None
@@ -399,6 +400,21 @@ def mark_link_secret(body: dict[str, Any]) -> dict[str, Any]:
     ``#k=`` link either. Servers that predate the flag ignore it.
     """
     return {**body, "link_secret": True}
+
+
+def minted_invite_id(minted: InviteMint) -> str:
+    """The id to revoke a fresh mint by: the server's, else ``blake3(token)``."""
+    return minted.invite_id or blake3.blake3(minted.invite_token.encode()).hexdigest()
+
+
+def require_stored(stored: StoredEnvelope) -> None:
+    """Refuse a ``link-envelope`` answer that does not say it stored the pair.
+
+    Raises:
+        InvalidResponse: If ``stored`` is not true.
+    """
+    if not stored.stored:
+        raise errors.InvalidResponse("the server did not confirm the invite link envelope")
 
 
 def finish_link_invite(

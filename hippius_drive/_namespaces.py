@@ -31,6 +31,7 @@ from hippius_drive.models import (
     FolderShare,
     FolderSharePage,
     InviteMeta,
+    InviteMint,
     MintedShare,
     OpenedShare,
     OwnerWrapsResult,
@@ -368,9 +369,17 @@ class DriveOps:
             self._seal(created, sealed)
             return created
         minted = self._client.run(_ops.create_drive_invite(_links.mark_link_secret(body)))
-        created, sealed, envelope = _links.finish_link_invite(minted, spec)
-        self._seal(created, sealed)
-        self._store_envelope(created, envelope)
+        try:
+            created, sealed, envelope = _links.finish_link_invite(minted, spec)
+            self._seal(created, sealed)
+            stored = self._client.run(self._envelope_op(created, envelope))
+            _links.require_stored(stored)
+        except (errors.DriveError, ValueError):
+            # Without its envelope the link never opens. Revoking is
+            # best-effort: an invite left behind expires on its own.
+            with contextlib.suppress(errors.DriveError, ValueError):
+                self._client.run(self._revoke_op(minted))
+            raise
         return created
 
     def invites(self) -> DriveInvites:
@@ -477,19 +486,15 @@ class DriveOps:
         page = self._client.run(_ops.list_memberships())
         return _links.open_memberships(member_master, member_ss58, page)
 
-    def _store_envelope(self, created: CreatedInvite, envelope: dict[str, str]) -> None:
+    def _envelope_op(self, created: CreatedInvite, envelope: dict[str, str]) -> Any:
         owner = _links.manager_owner(self._client.identity)
         folder = self._client.identity.folder_hash
-        try:
-            self._client.run(
-                _ops.put_invite_link_envelope(folder, created.invite_id, envelope, owner)
-            )
-        except errors.DriveError:
-            # Best-effort: an invite that is not revoked expires on its own,
-            # and it cannot be opened without the envelope anyway.
-            with contextlib.suppress(errors.DriveError):
-                self._client.run(_ops.revoke_drive_invite(folder, created.invite_id, owner))
-            raise
+        return _ops.put_invite_link_envelope(folder, created.invite_id, envelope, owner)
+
+    def _revoke_op(self, minted: InviteMint) -> Any:
+        owner = _links.manager_owner(self._client.identity)
+        folder = self._client.identity.folder_hash
+        return _ops.revoke_drive_invite(folder, _links.minted_invite_id(minted), owner)
 
     def _seal(self, created: CreatedInvite, sealed: str) -> None:
         if not sealed:
@@ -672,9 +677,15 @@ class AsyncDriveOps:
             await self._seal_async(created, sealed)
             return created
         minted = await self._client.run(_ops.create_drive_invite(_links.mark_link_secret(body)))
-        created, sealed, envelope = _links.finish_link_invite(minted, spec)
-        await self._seal_async(created, sealed)
-        await self._store_envelope_async(created, envelope)
+        try:
+            created, sealed, envelope = _links.finish_link_invite(minted, spec)
+            await self._seal_async(created, sealed)
+            stored = await self._client.run(self._envelope_op(created, envelope))
+            _links.require_stored(stored)
+        except (errors.DriveError, ValueError):
+            with contextlib.suppress(errors.DriveError, ValueError):
+                await self._client.run(self._revoke_op(minted))
+            raise
         return created
 
     async def invites(self) -> DriveInvites:
@@ -743,17 +754,15 @@ class AsyncDriveOps:
         page = await self._client.run(_ops.list_memberships())
         return _links.open_memberships(member_master, member_ss58, page)
 
-    async def _store_envelope_async(self, created: CreatedInvite, envelope: dict[str, str]) -> None:
+    def _envelope_op(self, created: CreatedInvite, envelope: dict[str, str]) -> Any:
         owner = _links.manager_owner(self._client.identity)
         folder = self._client.identity.folder_hash
-        try:
-            await self._client.run(
-                _ops.put_invite_link_envelope(folder, created.invite_id, envelope, owner)
-            )
-        except errors.DriveError:
-            with contextlib.suppress(errors.DriveError):
-                await self._client.run(_ops.revoke_drive_invite(folder, created.invite_id, owner))
-            raise
+        return _ops.put_invite_link_envelope(folder, created.invite_id, envelope, owner)
+
+    def _revoke_op(self, minted: InviteMint) -> Any:
+        owner = _links.manager_owner(self._client.identity)
+        folder = self._client.identity.folder_hash
+        return _ops.revoke_drive_invite(folder, _links.minted_invite_id(minted), owner)
 
     async def _seal_async(self, created: CreatedInvite, sealed: str) -> None:
         if not sealed:
