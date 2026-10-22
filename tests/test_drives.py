@@ -527,12 +527,30 @@ def test_an_invite_id_that_is_not_the_token_hash_is_refused_and_revoked(client: 
     respx.post(f"{BASE}/v1/drive-invites").mock(
         return_value=httpx.Response(200, json={"invite_token": TOKEN, "invite_id": "0" * 64})
     )
-    revoke = respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{'0' * 64}").mock(
+    wrong = respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{'0' * 64}")
+    revoke = respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}").mock(
         return_value=httpx.Response(204)
     )
     with pytest.raises(InvalidResponse, match="blake3"):
         client.drives.create_invite(InviteSpec(_phrase()))
     assert revoke.called
+    assert wrong.calls == []
+
+
+@pytest.mark.parametrize("answer", [{"stored": False}, {"stored": 1}, {"stored": "yes"}])
+@respx.mock
+def test_only_a_literal_stored_true_confirms_the_envelope(
+    client: Client, answer: dict[str, object]
+) -> None:
+    _mock_link_mint()
+    respx.put(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}/link-envelope").mock(
+        return_value=httpx.Response(200, json=answer)
+    )
+    respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}").mock(
+        return_value=httpx.Response(204)
+    )
+    with pytest.raises(InvalidResponse):
+        client.drives.create_invite(InviteSpec(_phrase()))
 
 
 @respx.mock

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
+from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer, StrictBool
 
 
 def _to_bytes(value: Any) -> Any:
@@ -887,7 +887,7 @@ class StoredEnvelope(_Wire):
         stored: True once the server holds this exact envelope.
     """
 
-    stored: bool = False
+    stored: StrictBool = False
 
 
 class InviteMeta(_Wire):

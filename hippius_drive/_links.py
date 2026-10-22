@@ -403,8 +403,12 @@ def mark_link_secret(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def minted_invite_id(minted: InviteMint) -> str:
-    """The id to revoke a fresh mint by: the server's, else ``blake3(token)``."""
-    return minted.invite_id or blake3.blake3(minted.invite_token.encode()).hexdigest()
+    """The id to revoke a fresh mint by: ``blake3(token)``, computed here.
+
+    The server's ``invite_id`` is that same hex, so the echo adds nothing;
+    and when it disagrees it is the value already found untrustworthy.
+    """
+    return blake3.blake3(minted.invite_token.encode()).hexdigest()
 
 
 def require_stored(stored: StoredEnvelope) -> None:
