@@ -336,7 +336,9 @@ def _ls_line(row: dict[str, Any]) -> str:
     if row.get("kind") == "dir":
         return f"dir   {row['total_bytes']:>12}  {row['name']}/"
     name = row.get("relative_path") or row.get("file_name") or "-"
-    return f"file  {row['size_bytes']:>12}  {name}"
+    line = f"file  {row['size_bytes']:>12}  {name}"
+    uploader = row.get("uploaded_by_name") or row.get("uploaded_by")
+    return f"{line}  (by {uploader})" if uploader else line
 
 
 @main.command()
