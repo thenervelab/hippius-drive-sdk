@@ -618,6 +618,8 @@ def invite_accept(obj: Context, url: str) -> None:
     click.echo(f"owner        {accepted.owner_ss58}")
     click.echo(f"folder_hash  {accepted.folder_hash}")
     click.echo(f"role         {accepted.role}")
+    if accepted.path_prefix:
+        click.echo(f"folder       {accepted.path_prefix}")
 
 
 @main.group(invoke_without_command=True)

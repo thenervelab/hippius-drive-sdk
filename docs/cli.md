@@ -163,7 +163,8 @@ hippius-drive drives leave OWNER_SS58 FOLDER_HASH
 not print the folder phrase. `invite accept` uses this configuration's mnemonic
 file and `--account`, and prints the owner, folder hash, and role. It takes both
 link forms: a `#k=` link carries the drive key, a `#i=` link carries a secret that
-fetches the key sealed on the server. Folder invites are not supported yet.
+fetches the key sealed on the server. A folder invite also prints the folder it
+admits to; the server keeps that account inside it.
 
 `drives` lists memberships opened from this account's grants: owner, folder
 hash, role, and label. `drives leave` looks that row up and leaves as the

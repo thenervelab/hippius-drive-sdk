@@ -346,14 +346,13 @@ def needs_link_key(fragment: InviteFragment) -> bool:
     return fragment.form is FragmentForm.LINK_SECRET
 
 
-def link_proof(fragment: InviteFragment, meta: InviteMeta) -> str:
-    """The ``x-hcfs-link-proof`` header for a ``#i=`` link.
+def invite_folder(meta: InviteMeta) -> str | None:
+    """A folder invite's ``path_prefix``, or None for a whole-drive invite."""
+    return meta.path_prefix or None
 
-    Raises:
-        ValueError: For a folder invite, which this SDK cannot accept yet.
-    """
-    if meta.path_prefix:
-        raise ValueError("folder invites are not supported yet; accept this one in the console")
+
+def link_proof(fragment: InviteFragment) -> str:
+    """The ``x-hcfs-link-proof`` header for a ``#i=`` link."""
     return invite_link.fetch_proof(fragment.material)
 
 
@@ -377,7 +376,7 @@ def open_link_key(fragment: InviteFragment, meta: InviteMeta, found: InviteLinkK
             or the envelope is not base64.
         DecryptError: If the envelope has the wrong shape or does not open.
     """
-    expected = InviteLinkKind.FOLDER if meta.path_prefix else InviteLinkKind.DRIVE
+    expected = InviteLinkKind.FOLDER if invite_folder(meta) else InviteLinkKind.DRIVE
     if found.kind != expected.value:
         raise errors.InvalidResponse(
             f"invite link kind {found.kind!r} does not match the invite ({expected.value})"
@@ -395,14 +394,23 @@ def accept_grant(member_master: str, member_ss58: str, folder_phrase: str) -> st
     return base64.b64encode(blob).decode()
 
 
-def accepted_invite(result: AcceptResult, folder_phrase: str) -> AcceptedInvite:
-    """Pair an accept response with the phrase the link carried."""
+def accepted_invite(result: AcceptResult, folder_phrase: str, meta: InviteMeta) -> AcceptedInvite:
+    """Pair an accept response with the phrase the link carried.
+
+    Raises:
+        InvalidResponse: If a folder invite's accept does not echo its folder.
+            The grant would then be read as whole-drive when it is not, or
+            the reverse.
+    """
+    if not result.already_owner and (result.path_prefix or None) != invite_folder(meta):
+        raise errors.InvalidResponse("the accept did not echo the invite's folder")
     return AcceptedInvite(
         owner_ss58=result.owner_ss58,
         folder_hash=result.folder_hash,
         role=result.role,
         folder_mnemonic=folder_phrase,
         already_owner=result.already_owner,
+        path_prefix=result.path_prefix,
     )
 
 

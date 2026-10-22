@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from nacl.signing import SigningKey
 
-from hippius_drive.crypto import kdf
+from hippius_drive.crypto import grant, kdf
 
 OWNER = "owner"
 READER = "reader"
@@ -166,6 +166,49 @@ class Identity:
             label=label,
             folder_hash=folder_hash,
             keys=kdf.folder_keys(folder_mnemonic),
+            role=role,
+        )
+
+    @classmethod
+    def for_folder_grant(
+        cls,
+        grant_phrase: str,
+        *,
+        owner_ss58: str,
+        folder_hash: str,
+        role: str,
+        label: str = "",
+    ) -> Identity:
+        """Build an identity for a folder invite's grant.
+
+        A folder invite carries the drive's derived file key, not the owner's
+        folder phrase, and the grant seals that key as a phrase. So the key is
+        the phrase's entropy, used as is. Running it through
+        :meth:`for_shared_drive` would derive a different key and encrypt
+        uploads under a key nobody else holds. The server limits this account
+        to the granted folder; the key itself still decrypts the whole drive.
+
+        Args:
+            grant_phrase: ``AcceptedInvite.folder_mnemonic`` of a folder invite.
+            owner_ss58: The drive owner's account.
+            folder_hash: The owner's 16-character lowercase hex folder id.
+            role: ``reader`` or ``writer``. A folder grant is never ``manager``.
+            label: The owner's display label, when known.
+
+        Returns:
+            An identity a member's bearer token can use inside the granted folder.
+
+        Raises:
+            ValueError: If the role, hash, or phrase is unusable.
+        """
+        if role not in {READER, WRITER}:
+            raise ValueError("a folder grant's role must be reader or writer")
+        file_key = grant.entropy_from_phrase(grant_phrase)
+        return cls(
+            account_ss58=owner_ss58,
+            label=label,
+            folder_hash=folder_hash,
+            keys=kdf.FolderKeys(signing_seed=file_key, encryption_key=file_key),
             role=role,
         )
 

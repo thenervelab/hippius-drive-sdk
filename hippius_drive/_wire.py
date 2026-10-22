@@ -1036,18 +1036,19 @@ class RequestBuilders:
         )
 
     @staticmethod
-    def accept_invite(token: str, grant_blob: str) -> Request:
+    def accept_invite(token: str, grant_blob: str, path_prefix: str | None = None) -> Request:
         """Build ``POST /v1/drive-invites/{token}/accept``.
 
         Args:
             token: The plaintext invite token.
             grant_blob: Standard padded base64 of the sealed folder phrase.
+            path_prefix: A folder invite's ``path_prefix``, echoed from the
+                preview. The server refuses a folder invite without it.
         """
-        return _capability(
-            "POST",
-            f"/v1/drive-invites/{_token(token)}/accept",
-            json={"grant_blob": grant_blob},
-        )
+        body: dict[str, Any] = {"grant_blob": grant_blob}
+        if path_prefix is not None:
+            body["path_prefix"] = path_prefix
+        return _capability("POST", f"/v1/drive-invites/{_token(token)}/accept", json=body)
 
     @staticmethod
     def list_memberships() -> Request:

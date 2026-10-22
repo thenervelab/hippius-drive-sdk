@@ -786,14 +786,18 @@ def invite_link_key(token: str, proof: str) -> Op[models.InviteLinkKey]:
     return Op(build.invite_link_key(token, proof), _parser(models.InviteLinkKey))
 
 
-def accept_invite(token: str, grant_blob: str) -> Op[models.AcceptResult]:
-    """Join a drive.
+def accept_invite(
+    token: str, grant_blob: str, path_prefix: str | None = None
+) -> Op[models.AcceptResult]:
+    """Join a drive, or one folder of it.
 
     Args:
         token: The plaintext invite token.
         grant_blob: Standard padded base64 of the sealed folder phrase.
+        path_prefix: A folder invite's ``path_prefix``, echoed from the preview.
     """
-    return Op(build.accept_invite(token, grant_blob), _parser(models.AcceptResult))
+    request = build.accept_invite(token, grant_blob, path_prefix)
+    return Op(request, _parser(models.AcceptResult))
 
 
 def list_memberships() -> Op[models.DriveMembershipsWire]:

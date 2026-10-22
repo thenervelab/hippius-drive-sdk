@@ -9,7 +9,7 @@ import pytest
 import respx
 from click.testing import CliRunner, Result
 
-from hippius_drive import __version__, cli
+from hippius_drive import __version__, _links, cli
 from hippius_drive._transport import Transport
 from hippius_drive.cli import main
 from hippius_drive.client import Client
@@ -1079,6 +1079,9 @@ def test_invite_accept_prints_the_drive_and_not_the_phrase(env: dict[str, str]) 
     phrase = kdf.derive_folder_mnemonic(MASTER, "default")
     entropy = kdf.folder_entropy(MASTER, "default")
     url = grant.invite_url(CONSOLE, "joinme", entropy)
+    respx.get(f"{BASE}/v1/drive-invites/joinme/meta").mock(
+        return_value=httpx.Response(200, json={"owner_ss58": OWNER, "folder_hash": FOLDER})
+    )
     respx.post(f"{BASE}/v1/drive-invites/joinme/accept").mock(
         return_value=httpx.Response(
             200,
@@ -1095,8 +1098,29 @@ def test_invite_accept_prints_the_drive_and_not_the_phrase(env: dict[str, str]) 
     assert f"owner        {OWNER}" in result.output
     assert f"folder_hash  {FOLDER}" in result.output
     assert "role         writer" in result.output
+    assert "folder" not in result.output.replace("folder_hash", "")
     assert phrase not in result.output
     assert MASTER not in result.output
+
+
+@respx.mock
+def test_invite_accept_names_the_folder_of_a_folder_invite(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_links, "accept_grant", lambda *_args: "e30=")
+    url = grant.invite_url(CONSOLE, "joinme", bytes([0x44]) * 32)
+    respx.get(f"{BASE}/v1/drive-invites/joinme/meta").mock(
+        return_value=httpx.Response(
+            200, json={"owner_ss58": OWNER, "folder_hash": FOLDER, "path_prefix": "Work"}
+        )
+    )
+    accepted = {"owner_ss58": OWNER, "folder_hash": FOLDER, "role": "reader", "path_prefix": "Work"}
+    respx.post(f"{BASE}/v1/drive-invites/joinme/accept").mock(
+        return_value=httpx.Response(200, json=accepted)
+    )
+    result = run(["invite", "accept", url], env)
+    assert result.exit_code == 0, result.output
+    assert "folder       Work" in result.output
 
 
 @respx.mock

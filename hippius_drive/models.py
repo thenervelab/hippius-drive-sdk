@@ -923,12 +923,14 @@ class AcceptResult(_Wire):
         folder_hash: The drive id.
         role: The role granted.
         already_owner: True when the owner opened their own invite.
+        path_prefix: Set for a folder invite: the folder the grant admits to.
     """
 
     owner_ss58: str
     folder_hash: str
     role: str = "writer"
     already_owner: bool = False
+    path_prefix: str | None = None
 
 
 class DriveMember(_Wire):
@@ -1092,9 +1094,12 @@ class AcceptedInvite:
         owner_ss58: The drive owner. Paths and ``salted_hash`` use this.
         folder_hash: The owner's folder id.
         role: The role granted.
-        folder_mnemonic: The owner's folder phrase. Pass it to
-            ``Identity.for_shared_drive``.
+        folder_mnemonic: The phrase the grant seals. For a whole-drive invite
+            it is the owner's folder phrase: pass it to
+            ``Identity.for_shared_drive``. For a folder invite it encodes the
+            drive's file key instead: pass it to ``Identity.for_folder_grant``.
         already_owner: True when the owner opened their own invite.
+        path_prefix: Set for a folder invite: the one folder this account may reach.
     """
 
     owner_ss58: str
@@ -1102,6 +1107,7 @@ class AcceptedInvite:
     role: str
     folder_mnemonic: str = field(repr=False)
     already_owner: bool = False
+    path_prefix: str | None = None
 
 
 @dataclass(frozen=True)

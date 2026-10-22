@@ -355,6 +355,9 @@ def test_membership_round_trip_opens_the_frozen_grant() -> None:
     phrase = _phrase()
     identity = Identity.from_master(MASTER, "default", account_ss58=SS58)
     client = Client(token="tok", identity=identity, transport=Transport(BASE, "tok"))
+    respx.get(url__regex=r".*/meta$").mock(
+        return_value=httpx.Response(200, json={"owner_ss58": SS58, "folder_hash": FOLDER})
+    )
     respx.post(url__regex=r".*/accept$").mock(
         return_value=httpx.Response(
             200,

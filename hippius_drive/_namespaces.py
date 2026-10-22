@@ -428,25 +428,28 @@ class DriveOps:
         """Join a drive and seal its folder phrase under the member's master.
 
         Args:
-            invite_url: An invite URL, ``#k=`` or ``#i=``. A ``#i=`` link costs
-                two extra requests: the preview and the sealed key.
+            invite_url: An invite URL, ``#k=`` or ``#i=``, whole drive or one
+                folder. The anonymous preview is read first; a ``#i=`` link
+                then fetches its sealed key.
             member_master: The member's master phrase. It is not the drive key.
             member_ss58: The account ``member_master``'s token resolves to.
 
         Returns:
-            The drive identity and the folder phrase for ``Identity.for_shared_drive``.
+            The drive identity and the grant phrase. ``path_prefix`` says which
+            ``Identity`` constructor takes it.
         """
         fragment = invite_link.parse_invite_link(invite_url)
+        meta = self._client.run(_ops.invite_meta(fragment.token))
         key = fragment.material
         if _links.needs_link_key(fragment):
-            meta = self._client.run(_ops.invite_meta(fragment.token))
-            proof = _links.link_proof(fragment, meta)
+            proof = _links.link_proof(fragment)
             found = self._client.run(_ops.invite_link_key(fragment.token, proof))
             key = _links.open_link_key(fragment, meta, found)
         phrase = _links.grant.phrase_from_entropy(key)
         blob = _links.accept_grant(member_master, member_ss58, phrase)
-        result = self._client.run(_ops.accept_invite(fragment.token, blob))
-        return _links.accepted_invite(result, phrase)
+        op = _ops.accept_invite(fragment.token, blob, _links.invite_folder(meta))
+        result = self._client.run(op)
+        return _links.accepted_invite(result, phrase, meta)
 
     def memberships(self, member_master: str, *, member_ss58: str) -> Sequence[DriveMembership]:
         """List joined drives and open each grant with the member's master phrase.
@@ -687,16 +690,17 @@ class AsyncDriveOps:
     ) -> AcceptedInvite:
         """Async twin of :meth:`DriveOps.accept`."""
         fragment = invite_link.parse_invite_link(invite_url)
+        meta = await self._client.run(_ops.invite_meta(fragment.token))
         key = fragment.material
         if _links.needs_link_key(fragment):
-            meta = await self._client.run(_ops.invite_meta(fragment.token))
-            proof = _links.link_proof(fragment, meta)
+            proof = _links.link_proof(fragment)
             found = await self._client.run(_ops.invite_link_key(fragment.token, proof))
             key = _links.open_link_key(fragment, meta, found)
         phrase = _links.grant.phrase_from_entropy(key)
         blob = _links.accept_grant(member_master, member_ss58, phrase)
-        result = await self._client.run(_ops.accept_invite(fragment.token, blob))
-        return _links.accepted_invite(result, phrase)
+        op = _ops.accept_invite(fragment.token, blob, _links.invite_folder(meta))
+        result = await self._client.run(op)
+        return _links.accepted_invite(result, phrase, meta)
 
     async def memberships(
         self, member_master: str, *, member_ss58: str
