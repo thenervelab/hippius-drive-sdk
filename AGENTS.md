@@ -276,6 +276,8 @@ secrets are present. Fork PRs skip e2e. The required check is the `ci` job.
 |---|---|
 | `hippius_drive/__init__.py` | Public re-exports (`__all__` is the API) |
 | `client.py` | `Client` / `AsyncClient`: `folders`, `files`, `summary`, `shares`, `folder_shares`, `drives` |
+| `auth.py` | Access-key sign-in to the Hippius API (`login`, `login_async`); needs the `login` extra |
+| `crypto/wallet.py` | The sr25519 and secp256k1 keys an access key stands for; imported only by `auth` |
 | `identity.py` | Account + per-folder keys; member role; ToS / rename signing text |
 | `models.py` | Pydantic wire types; byte fields as JSON int arrays |
 | `errors.py` | `DriveError` tree, including `Gone` |

@@ -62,6 +62,8 @@ class WalletKeys:
     def sign_evm(self, message: str) -> str:
         """Return ``0x`` + hex of an EIP-191 ``personal_sign`` signature (v = 27/28)."""
         raw = PrivateKey(self._evm_secret).sign_recoverable(eip191_hash(message), hasher=None)
+        if raw[64] > 1:  # pragma: no cover - recovery id 2/3: x >= n, probability ~2^-127
+            raise ValueError("signature has a recovery id Ethereum cannot express; sign again")
         return "0x" + raw[:64].hex() + f"{raw[64] + 27:02x}"
 
 
@@ -69,7 +71,9 @@ def wallet_keys(phrase: str) -> WalletKeys:
     """Derive both keys from an access key.
 
     Args:
-        phrase: The BIP-39 phrase, 12 or 24 words.
+        phrase: The BIP-39 phrase, 12 or 24 words. Runs of whitespace count as
+            one space; polkadot.js refuses them, this derives what it derives
+            for the cleanly spaced phrase.
 
     Returns:
         The addresses and signing keys.
@@ -121,7 +125,16 @@ def eip191_hash(message: str) -> bytes:
 def _bip32_secret(seed: bytes, path: tuple[int, ...]) -> bytes:
     master = hmac.new(b"Bitcoin seed", seed, hashlib.sha512).digest()
     key, chain = master[:32], master[32:]
+    if not 0 < int.from_bytes(key, "big") < _SECP256K1_N:  # pragma: no cover - ~2^-127
+        raise ValueError("BIP-32 master key is invalid for this phrase")
     for index in path:
+        key, chain = _bip32_child(key, chain, index)
+    return key
+
+
+def _bip32_child(key: bytes, chain: bytes, index: int) -> tuple[bytes, bytes]:
+    """CKDpriv; an invalid child moves on to the next index, as BIP-32 says."""
+    while True:
         if index & _HARDENED:
             data = b"\x00" + key + index.to_bytes(4, "big")
         else:
@@ -129,10 +142,9 @@ def _bip32_secret(seed: bytes, path: tuple[int, ...]) -> bytes:
         digest = hmac.new(chain, data, hashlib.sha512).digest()
         tweak = int.from_bytes(digest[:32], "big")
         child = (tweak + int.from_bytes(key, "big")) % _SECP256K1_N
-        if tweak >= _SECP256K1_N or child == 0:  # pragma: no cover - probability ~2^-127
-            raise ValueError("BIP-32 derivation hit an invalid key; use another phrase")
-        key, chain = child.to_bytes(32, "big"), digest[32:]
-    return key
+        if tweak < _SECP256K1_N and child != 0:
+            return child.to_bytes(32, "big"), digest[32:]
+        index += 1  # pragma: no cover - probability ~2^-127
 
 
 def _keccak(data: bytes) -> bytes:

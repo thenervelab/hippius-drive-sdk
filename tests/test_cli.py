@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import blake3
+import click
 import httpx
 import pytest
 import respx
@@ -1398,3 +1399,70 @@ def test_init_takes_one_phrase_source(tmp_path: Path) -> None:
     result = run(args, env)
     assert result.exit_code != 0
     assert "not both" in result.output
+
+
+def test_a_secret_from_a_terminal_is_prompted_without_echo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    prompts: list[bool] = []
+
+    def fake_prompt(_text: str, *, hide_input: bool) -> str:
+        prompts.append(hide_input)
+        return f" {ACCESS_KEY} "
+
+    monkeypatch.setattr(cli.click, "prompt", fake_prompt)
+    assert cli._read_secret(Path("-")) == ACCESS_KEY
+    assert prompts == [True]
+
+
+def test_a_secret_must_come_from_a_regular_file(tmp_path: Path) -> None:
+    # POSIX opens a directory and fstat refuses it; Windows refuses the open.
+    with pytest.raises(click.ClickException, match="not a regular file|cannot read"):
+        cli._read_secret(tmp_path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="O_NOFOLLOW")
+def test_a_symlinked_secret_file_is_not_followed(tmp_path: Path) -> None:
+    real = _phrase_file(tmp_path)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    with pytest.raises(click.ClickException, match="cannot read"):
+        cli._read_secret(link)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks")
+def test_a_token_file_symlink_is_refused(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.write_text("keep")
+    link = tmp_path / "token"
+    link.symlink_to(target)
+    with pytest.raises(click.ClickException, match="symlink"):
+        cli._write_secret(link, "tok")
+    assert target.read_text() == "keep"
+
+
+def test_a_token_file_in_a_missing_directory_is_one_line(tmp_path: Path) -> None:
+    with pytest.raises(click.ClickException, match="cannot write"):
+        cli._write_secret(tmp_path / "missing" / "token", "tok")
+
+
+def test_a_failed_token_replace_leaves_no_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(cli.os, "replace", refuse)
+    with pytest.raises(click.ClickException, match="cannot write"):
+        cli._write_secret(tmp_path / "token", "tok")
+    assert list(tmp_path.iterdir()) == []
+
+
+@respx.mock
+def test_a_token_file_login_drops_a_stale_config_token(tmp_path: Path, config_path: Path) -> None:
+    _mock_api()
+    _config.save({"token": "old-account-token", "account_ss58": "5Old"}, config_path=config_path)
+    args = ["auth", "login", "--phrase-file", str(_phrase_file(tmp_path)), "--api", API]
+    result = run([*args, "--token-file", str(tmp_path / "token")], {})
+    assert result.exit_code == 0, result.output
+    cfg = _config.load({}, environ={}, config_path=config_path)
+    assert (cfg.token, cfg.account_ss58) == (None, ACCESS_SS58)

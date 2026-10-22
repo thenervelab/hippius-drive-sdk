@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -111,28 +113,55 @@ def _checked(getter: Any) -> Any:
         raise click.ClickException(str(exc)) from exc
 
 
+_SECRET_FILE_MAX = 64 * 1024
+
+
 def _read_secret(path: Path) -> str:
     """Read a phrase or link from a file, or from stdin for ``-``. Never echoed.
 
-    A file other users can read is refused on POSIX: the secret should live
-    in an owner-only file, not wherever it happened to be written.
+    The file is opened once, without following a symlink, and judged by what
+    was opened: it must be a regular file, and on POSIX one other users cannot
+    read. On a terminal, ``-`` prompts with echo off instead of reading raw.
     """
     if str(path) == "-":
-        return sys.stdin.read().strip()
+        if sys.stdin.isatty():
+            return str(click.prompt("Secret", hide_input=True)).strip()
+        return sys.stdin.read(_SECRET_FILE_MAX).strip()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        if os.name == "posix" and path.stat().st_mode & 0o077:
-            raise click.ClickException(f"{path} is readable by other users; chmod 600 it first")
-        return path.read_text(encoding="utf-8").strip()
+        fd = os.open(path, flags)
     except OSError as exc:
         raise click.ClickException(f"cannot read {path}: {exc.strerror}") from exc
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(fd)
+        raise click.ClickException(f"{path} is not a regular file")
+    if os.name == "posix" and info.st_mode & 0o077:
+        os.close(fd)
+        raise click.ClickException(f"{path} is readable by other users; chmod 600 it first")
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read(_SECRET_FILE_MAX).strip()
 
 
 def _write_secret(path: Path, value: str) -> None:
-    """Write a secret to an owner-only file (0600), replacing what was there."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(value + "\n")
-    path.chmod(0o600)
+    """Write a secret to an owner-only file (0600 from creation), atomically.
+
+    A symlink at ``path`` is refused rather than followed, so the token can
+    neither land somewhere else nor sit briefly in a file others can read.
+    """
+    if path.is_symlink():
+        raise click.ClickException(f"{path} is a symlink; give the real path")
+    try:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".token-")
+    except OSError as exc:
+        raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        Path(tmp).unlink(missing_ok=True)
+        raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
 
 
 def _prompt_password() -> str:
@@ -308,7 +337,10 @@ def auth_login(
         raise click.ClickException(str(exc)) from exc
     if token_file is not None:
         _write_secret(token_file, session.token)
-        saved = _checked(lambda: _config.save({"account_ss58": session.account_ss58}))
+        # Drop a token the config held for another account: it would pair
+        # with this account and fail every call.
+        dropped: dict[str, str | None] = {"account_ss58": session.account_ss58, "token": None}
+        saved = _checked(lambda: _config.save(dropped))
         where = token_file
     else:
         updates = {"token": session.token, "account_ss58": session.account_ss58}

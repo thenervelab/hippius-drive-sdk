@@ -4,6 +4,9 @@ from hippius_drive._links import FileShareSpec as FileShareSpec
 from hippius_drive._links import FolderShareSpec as FolderShareSpec
 from hippius_drive._links import InviteSpec as InviteSpec
 from hippius_drive._version import __version__ as __version__
+from hippius_drive.auth import ApiSession as ApiSession
+from hippius_drive.auth import login as login
+from hippius_drive.auth import login_async as login_async
 from hippius_drive.client import AsyncClient as AsyncClient
 from hippius_drive.client import Client as Client
 from hippius_drive.errors import Conflict as Conflict
@@ -33,6 +36,7 @@ from hippius_drive.models import ShareTtl as ShareTtl
 
 __all__ = [
     "AcceptedInvite",
+    "ApiSession",
     "AsyncClient",
     "BrowseOptions",
     "Client",
@@ -62,4 +66,6 @@ __all__ = [
     "TransportError",
     "Unauthorized",
     "__version__",
+    "login",
+    "login_async",
 ]

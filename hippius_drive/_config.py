@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -161,14 +162,14 @@ def load(
     return replace(Config(), **merged)
 
 
-def save(updates: dict[str, str], *, config_path: Path | None = None) -> Path:
+def save(updates: Mapping[str, str | None], *, config_path: Path | None = None) -> Path:
     """Write ``updates`` into the config file, keeping its other settings.
 
     The file can hold the API token, so it is written owner-only (0600),
     atomically, and its directory is created owner-only.
 
     Args:
-        updates: Settings to set; keys must be config fields.
+        updates: Settings to set; keys must be config fields. None removes one.
         config_path: The config file; the default location when omitted.
 
     Returns:
@@ -182,7 +183,11 @@ def save(updates: dict[str, str], *, config_path: Path | None = None) -> Path:
     if unknown:
         raise ConfigError(f"not a config setting: {', '.join(sorted(unknown))}")
     merged = {key: str(value) for key, value in _from_file(path).items()}
-    merged.update(updates)
+    for key, value in updates.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     body = "".join(f"{key} = {_toml_string(value)}\n" for key, value in sorted(merged.items()))
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".toml")
