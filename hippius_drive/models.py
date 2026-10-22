@@ -688,6 +688,7 @@ class Capabilities(_Wire):
         folder_share_revoke_by_hash: Revoke and expiry by ``token_hash``.
         share_owner_wrap: Owner-wrap upload is mounted.
         member_folder_shares: A member may mint a folder share on a shared drive.
+        drive_invite_link_envelopes: The server opens ``#i=`` link-secret invites.
     """
 
     shares: bool = False
@@ -695,6 +696,7 @@ class Capabilities(_Wire):
     folder_share_revoke_by_hash: bool = False
     share_owner_wrap: bool = False
     member_folder_shares: bool = False
+    drive_invite_link_envelopes: bool = False
 
 
 class ExpiryResult(_Wire):
@@ -1088,11 +1090,12 @@ class OpenedShare:
 
 @dataclass(frozen=True)
 class CreatedInvite:
-    """An invite link. The fragment is the drive key and is not stored server-side.
+    """An invite link. Its fragment opens the drive key and never reaches the server.
 
     Attributes:
         invite_token: The plaintext join capability.
-        invite_url: ``{console}/invite/{token}#k={entropy}``.
+        invite_url: ``{console}/invite/{token}#i={link secret}``, or ``#k={entropy}``
+            on a server without link-secret invites.
         invite_id: Blake3 hex of the token.
     """
 

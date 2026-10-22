@@ -18,11 +18,13 @@ from hippius_drive.client import AsyncClient, Client
 from hippius_drive.crypto import grant, invite_link, kdf
 from hippius_drive.crypto.invite_link import InviteLinkKind
 from hippius_drive.errors import (
+    Conflict,
     DecryptError,
     Forbidden,
     InvalidResponse,
     MemberLimitReached,
     NotFound,
+    ServerError,
 )
 from hippius_drive.identity import Identity
 
@@ -44,17 +46,17 @@ def _phrase() -> str:
 
 
 @respx.mock
-def test_create_invite_seals_the_token_and_returns_a_fragment_url(client: Client) -> None:
+def test_an_older_server_gets_a_key_fragment_invite(client: Client) -> None:
     invite_id = blake3.blake3(TOKEN.encode()).hexdigest()
-    respx.post(f"{BASE}/v1/drive-invites").mock(
+    respx.get(f"{BASE}/v1/capabilities").mock(return_value=httpx.Response(404))
+    mint = respx.post(f"{BASE}/v1/drive-invites").mock(
         return_value=httpx.Response(200, json={"invite_token": TOKEN, "invite_id": invite_id})
     )
     seal = respx.put(f"{BASE}/v1/drives/{FOLDER}/invites/{invite_id}/sealed-token").mock(
         return_value=httpx.Response(200)
     )
     created = client.drives.create_invite(InviteSpec(_phrase(), role="writer"))
-    mint = json.loads(respx.calls[0].request.content)
-    assert mint == {"folder_hash": FOLDER, "role": "writer"}
+    assert json.loads(mint.calls.last.request.content) == {"folder_hash": FOLDER, "role": "writer"}
     prefix = f"{DEFAULT_CONSOLE}/invite/{TOKEN}#k="
     assert created.invite_url.startswith(prefix)
     assert len(created.invite_url) > len(prefix)
@@ -68,6 +70,7 @@ def test_create_invite_seals_the_token_and_returns_a_fragment_url(client: Client
 @respx.mock
 def test_a_failed_seal_back_still_returns_the_invite_url(client: Client) -> None:
     invite_id = blake3.blake3(TOKEN.encode()).hexdigest()
+    respx.get(f"{BASE}/v1/capabilities").mock(return_value=httpx.Response(404))
     respx.post(f"{BASE}/v1/drive-invites").mock(
         return_value=httpx.Response(200, json={"invite_token": TOKEN, "invite_id": invite_id})
     )
@@ -443,6 +446,96 @@ def test_memberships_list_folder_grants_with_their_folder(
     ]
 
 
+INVITE_ID = blake3.blake3(TOKEN.encode()).hexdigest()
+
+
+def _mock_link_mint(*, store_status: int = 200) -> tuple[respx.Route, respx.Route]:
+    respx.get(f"{BASE}/v1/capabilities").mock(
+        return_value=httpx.Response(200, json={"drive_invite_link_envelopes": True})
+    )
+    mint = respx.post(f"{BASE}/v1/drive-invites").mock(
+        return_value=httpx.Response(200, json={"invite_token": TOKEN, "invite_id": INVITE_ID})
+    )
+    respx.put(url__regex=r".*/sealed-token(\?.*)?$").mock(return_value=httpx.Response(204))
+    stored = respx.put(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}/link-envelope").mock(
+        return_value=httpx.Response(
+            store_status, json={"error": "link_envelope_already_set", "message": "no"}
+        )
+    )
+    return mint, stored
+
+
+@respx.mock
+def test_create_invite_mints_a_link_secret_and_stores_its_envelope(client: Client) -> None:
+    mint, stored = _mock_link_mint()
+    created = client.drives.create_invite(InviteSpec(_phrase(), role="writer"))
+    assert json.loads(mint.calls.last.request.content)["link_secret"] is True
+    link = invite_link.parse_invite_link(created.invite_url)
+    assert created.invite_url.startswith(f"{DEFAULT_CONSOLE}/invite/{TOKEN}#i=")
+    assert link.material == _link_secret()
+    assert created.invite_id == INVITE_ID
+    body = json.loads(stored.calls.last.request.content)
+    envelope = base64.b64decode(body["link_envelope"])
+    opened = invite_link.open_envelope(link.material, envelope, InviteLinkKind.DRIVE)
+    assert opened == kdf.folder_entropy(MASTER, "default")
+    assert base64.b64decode(body["link_fetch_digest"]) == invite_link.fetch_digest(link.material)
+    assert "owner" not in stored.calls.last.request.url.params
+    assert _phrase() not in created.invite_url
+
+
+@respx.mock
+def test_a_manager_stores_the_envelope_on_the_owners_drive() -> None:
+    manager = Identity.for_shared_drive(
+        _phrase(), owner_ss58=SS58, folder_hash=FOLDER, role="manager"
+    )
+    client = Client(token="member", identity=manager, transport=Transport(BASE, "member"))
+    _mint, stored = _mock_link_mint()
+    client.drives.create_invite(InviteSpec(_phrase()))
+    assert stored.calls.last.request.url.params["owner"] == SS58
+
+
+@respx.mock
+def test_an_envelope_that_cannot_be_stored_revokes_the_invite(client: Client) -> None:
+    _mint, _stored = _mock_link_mint(store_status=409)
+    revoke = respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}").mock(
+        return_value=httpx.Response(204)
+    )
+    with pytest.raises(Conflict):
+        client.drives.create_invite(InviteSpec(_phrase()))
+    assert revoke.called
+
+
+@respx.mock
+def test_a_failed_revoke_still_raises_the_store_error(client: Client) -> None:
+    _mock_link_mint(store_status=409)
+    respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}").mock(
+        return_value=httpx.Response(500)
+    )
+    with pytest.raises(Conflict):
+        client.drives.create_invite(InviteSpec(_phrase()))
+
+
+@respx.mock
+def test_an_invite_id_that_is_not_the_token_hash_is_refused(client: Client) -> None:
+    respx.get(f"{BASE}/v1/capabilities").mock(
+        return_value=httpx.Response(200, json={"drive_invite_link_envelopes": True})
+    )
+    respx.post(f"{BASE}/v1/drive-invites").mock(
+        return_value=httpx.Response(200, json={"invite_token": TOKEN, "invite_id": "0" * 64})
+    )
+    with pytest.raises(InvalidResponse, match="blake3"):
+        client.drives.create_invite(InviteSpec(_phrase()))
+
+
+@respx.mock
+def test_a_failed_capability_lookup_mints_nothing(client: Client) -> None:
+    respx.get(f"{BASE}/v1/capabilities").mock(return_value=httpx.Response(500))
+    mint = respx.post(f"{BASE}/v1/drive-invites")
+    with pytest.raises(ServerError):
+        client.drives.create_invite(InviteSpec(_phrase()))
+    assert mint.calls == []
+
+
 @pytest.mark.anyio
 @respx.mock
 async def test_the_async_client_echoes_a_folder_invites_prefix(quick_grant: list[str]) -> None:
@@ -458,3 +551,28 @@ async def test_the_async_client_echoes_a_folder_invites_prefix(quick_grant: list
     assert json.loads(accept.calls.last.request.content)["path_prefix"] == "Work"
     assert quick_grant == [grant.phrase_from_entropy(FILE_KEY)]
     await client.aclose()
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_the_async_client_revokes_when_the_envelope_fails() -> None:
+    identity = Identity.from_master(MASTER, "default", account_ss58=SS58)
+    client = AsyncClient(token="tok", identity=identity, transport=AsyncTransport(BASE, "tok"))
+    _mock_link_mint(store_status=409)
+    revoke = respx.delete(f"{BASE}/v1/drives/{FOLDER}/invites/{INVITE_ID}").mock(
+        return_value=httpx.Response(500)
+    )
+    with pytest.raises(Conflict):
+        await client.drives.create_invite(InviteSpec(_phrase()))
+    assert revoke.called
+    await client.aclose()
+
+
+def test_invite_link_url_refuses_bad_input() -> None:
+    secret = _link_secret()
+    with pytest.raises(ValueError, match="https"):
+        invite_link.invite_link_url("http://x.io", TOKEN, secret)
+    with pytest.raises(ValueError, match="https"):
+        invite_link.invite_link_url("https://x.io/", TOKEN, secret)
+    with pytest.raises(ValueError, match="segment"):
+        invite_link.invite_link_url("https://x.io", "a/b", secret)

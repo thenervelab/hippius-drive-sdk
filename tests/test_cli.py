@@ -14,7 +14,15 @@ from hippius_drive import __version__, _links, cli
 from hippius_drive._transport import Transport
 from hippius_drive.cli import main
 from hippius_drive.client import Client
-from hippius_drive.crypto import file_cipher, grant, hashes, kdf, mnemonic_store, sharing
+from hippius_drive.crypto import (
+    file_cipher,
+    grant,
+    hashes,
+    invite_link,
+    kdf,
+    mnemonic_store,
+    sharing,
+)
 from hippius_drive.identity import Identity
 from tests.helpers import multipart_parts
 
@@ -954,24 +962,38 @@ def test_folder_share_ls_prints_the_hash_and_rm_revokes(env: dict[str, str]) -> 
 
 
 @respx.mock
-def test_invite_put_prints_the_entropy_url_and_not_the_phrase(env: dict[str, str]) -> None:
+def test_invite_put_prints_a_link_secret_url_and_not_the_phrase(env: dict[str, str]) -> None:
     token = "inviteTok"
     invite_id = blake3.blake3(token.encode()).hexdigest()
-    respx.post(f"{BASE}/v1/drive-invites").mock(
+    respx.get(f"{BASE}/v1/capabilities").mock(
+        return_value=httpx.Response(200, json={"drive_invite_link_envelopes": True})
+    )
+    mint = respx.post(f"{BASE}/v1/drive-invites").mock(
         return_value=httpx.Response(200, json={"invite_token": token, "invite_id": invite_id})
     )
     seal = respx.put(url__regex=r".*/sealed-token$").mock(return_value=httpx.Response(204))
+    stored = respx.put(f"{BASE}/v1/drives/{FOLDER}/invites/{invite_id}/link-envelope").mock(
+        return_value=httpx.Response(200, json={"stored": True})
+    )
     result = run(["invite", "put", "--role", "reader", "--days", "2"], env)
     assert result.exit_code == 0, result.output
     phrase = kdf.derive_folder_mnemonic(MASTER, "default")
     assert phrase not in result.output
     assert MASTER not in result.output
-    got_token, entropy = grant.parse_invite_url(result.output.strip())
-    assert got_token == token
-    assert entropy == kdf.folder_entropy(MASTER, "default")
-    body = json.loads(respx.calls[0].request.content)
-    assert body == {"folder_hash": FOLDER, "role": "reader", "expires_in_secs": 2 * 86400}
+    link = invite_link.parse_invite_link(result.output.strip())
+    assert link.token == token
+    entropy = kdf.folder_entropy(MASTER, "default")
+    raw_id = invite_link.invite_id_for_token(token)
+    assert link.material == invite_link.derive_link_secret(entropy, raw_id)
+    body = json.loads(mint.calls.last.request.content)
+    assert body == {
+        "folder_hash": FOLDER,
+        "role": "reader",
+        "expires_in_secs": 2 * 86400,
+        "link_secret": True,
+    }
     assert seal.called
+    assert stored.called
 
 
 @respx.mock
@@ -984,6 +1006,7 @@ def test_invite_put_unlocks_once_and_omits_the_lifetime(
         return_value=httpx.Response(200, json={"invite_token": token, "invite_id": invite_id})
     )
     respx.put(url__regex=r".*/sealed-token$").mock(return_value=httpx.Response(204))
+    respx.get(f"{BASE}/v1/capabilities").mock(return_value=httpx.Response(200, json={}))
     loads: list[int] = []
     real = mnemonic_store.load
 
@@ -994,7 +1017,8 @@ def test_invite_put_unlocks_once_and_omits_the_lifetime(
     monkeypatch.setattr("hippius_drive.cli.mnemonic_store.load", counting)
     assert run(["invite", "put"], env).exit_code == 0
     assert loads == [1]
-    assert json.loads(respx.calls[0].request.content) == {"folder_hash": FOLDER, "role": "writer"}
+    mint = next(call for call in respx.calls if call.request.method == "POST")
+    assert json.loads(mint.request.content) == {"folder_hash": FOLDER, "role": "writer"}
 
 
 @respx.mock

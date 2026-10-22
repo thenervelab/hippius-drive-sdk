@@ -516,6 +516,7 @@ def test_download_errors_and_a_path_source(tmp_path) -> None:
     with pytest.raises(ValueError, match="hex"):
         build.revoke_folder_share_by_hash("not-a-hash")
     build.folder_share_meta("tok")
+    respx.get(f"{BASE}/v1/capabilities").mock(return_value=httpx.Response(404))
     respx.post(f"{BASE}/v1/drive-invites").mock(
         return_value=httpx.Response(200, json={"invite_token": TOKEN, "invite_id": "0" * 64})
     )

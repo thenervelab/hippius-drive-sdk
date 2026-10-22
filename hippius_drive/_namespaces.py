@@ -6,6 +6,7 @@ whether they await, including the multi-step file-share upload.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -348,6 +349,11 @@ class DriveOps:
     def create_invite(self, spec: _links.InviteSpec) -> CreatedInvite:
         """Mint an invite URL. Seal-back is best-effort and does not unmint.
 
+        A server that opens link-secret invites gets a ``#i=`` link, whose
+        envelope is stored right after the mint; if that fails the invite is
+        revoked and the error raised, so a dead link is never returned. An
+        older server gets a ``#k=`` link, which carries the drive key itself.
+
         Args:
             spec: Folder phrase, role, lifetime, and console origin.
 
@@ -355,9 +361,16 @@ class DriveOps:
             The token, the URL, and the invite id.
         """
         body = _links.invite_body(self._client.identity, spec)
-        minted = self._client.run(_ops.create_drive_invite(body))
-        created, sealed = _links.finish_invite(minted, spec)
+        caps = _links.capabilities_or_disabled(self._client.run)
+        if not caps.drive_invite_link_envelopes:
+            minted = self._client.run(_ops.create_drive_invite(body))
+            created, sealed = _links.finish_invite(minted, spec)
+            self._seal(created, sealed)
+            return created
+        minted = self._client.run(_ops.create_drive_invite(_links.mark_link_secret(body)))
+        created, sealed, envelope = _links.finish_link_invite(minted, spec)
         self._seal(created, sealed)
+        self._store_envelope(created, envelope)
         return created
 
     def invites(self) -> DriveInvites:
@@ -463,6 +476,20 @@ class DriveOps:
         """
         page = self._client.run(_ops.list_memberships())
         return _links.open_memberships(member_master, member_ss58, page)
+
+    def _store_envelope(self, created: CreatedInvite, envelope: dict[str, str]) -> None:
+        owner = _links.manager_owner(self._client.identity)
+        folder = self._client.identity.folder_hash
+        try:
+            self._client.run(
+                _ops.put_invite_link_envelope(folder, created.invite_id, envelope, owner)
+            )
+        except errors.DriveError:
+            # Best-effort: an invite that is not revoked expires on its own,
+            # and it cannot be opened without the envelope anyway.
+            with contextlib.suppress(errors.DriveError):
+                self._client.run(_ops.revoke_drive_invite(folder, created.invite_id, owner))
+            raise
 
     def _seal(self, created: CreatedInvite, sealed: str) -> None:
         if not sealed:
@@ -638,9 +665,16 @@ class AsyncDriveOps:
     async def create_invite(self, spec: _links.InviteSpec) -> CreatedInvite:
         """Async twin of :meth:`DriveOps.create_invite`."""
         body = _links.invite_body(self._client.identity, spec)
-        minted = await self._client.run(_ops.create_drive_invite(body))
-        created, sealed = _links.finish_invite(minted, spec)
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        if not caps.drive_invite_link_envelopes:
+            minted = await self._client.run(_ops.create_drive_invite(body))
+            created, sealed = _links.finish_invite(minted, spec)
+            await self._seal_async(created, sealed)
+            return created
+        minted = await self._client.run(_ops.create_drive_invite(_links.mark_link_secret(body)))
+        created, sealed, envelope = _links.finish_link_invite(minted, spec)
         await self._seal_async(created, sealed)
+        await self._store_envelope_async(created, envelope)
         return created
 
     async def invites(self) -> DriveInvites:
@@ -708,6 +742,18 @@ class AsyncDriveOps:
         """Async twin of :meth:`DriveOps.memberships`."""
         page = await self._client.run(_ops.list_memberships())
         return _links.open_memberships(member_master, member_ss58, page)
+
+    async def _store_envelope_async(self, created: CreatedInvite, envelope: dict[str, str]) -> None:
+        owner = _links.manager_owner(self._client.identity)
+        folder = self._client.identity.folder_hash
+        try:
+            await self._client.run(
+                _ops.put_invite_link_envelope(folder, created.invite_id, envelope, owner)
+            )
+        except errors.DriveError:
+            with contextlib.suppress(errors.DriveError):
+                await self._client.run(_ops.revoke_drive_invite(folder, created.invite_id, owner))
+            raise
 
     async def _seal_async(self, created: CreatedInvite, sealed: str) -> None:
         if not sealed:

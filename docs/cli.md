@@ -160,7 +160,11 @@ hippius-drive drives leave OWNER_SS58 FOLDER_HASH
 ```
 
 `invite put` prints the invite URL and performs the seal-back itself. It does
-not print the folder phrase. `invite accept` uses this configuration's mnemonic
+not print the folder phrase. On a server that opens link-secret invites (all of
+production today) the URL is a `#i=` link: the drive key stays on the server,
+sealed, and is released only to a signed-in account that can still accept the
+invite. If that sealed key cannot be stored, the invite is revoked and the
+command fails rather than print a link that would never open. `invite accept` uses this configuration's mnemonic
 file and `--account`, and prints the owner, folder hash, and role. It takes both
 link forms: a `#k=` link carries the drive key, a `#i=` link carries a secret that
 fetches the key sealed on the server. A folder invite also prints the folder it

@@ -935,6 +935,25 @@ class RequestBuilders:
         )
 
     @staticmethod
+    def put_invite_link_envelope(
+        folder_hash: str, invite_id: str, body: dict[str, str], owner: str | None
+    ) -> Request:
+        """Build ``PUT /v1/drives/{folder_hash}/invites/{invite_id}/link-envelope``.
+
+        Args:
+            folder_hash: The drive id.
+            invite_id: Blake3 hex of the invite token.
+            body: ``link_envelope`` and ``link_fetch_digest``, standard base64.
+            owner: Set when a manager mints on someone else's drive.
+        """
+        return Request(
+            "PUT",
+            f"/v1/drives/{_segment(folder_hash)}/invites/{_hash64(invite_id)}/link-envelope",
+            params=_params(owner=owner) or None,
+            json=body,
+        )
+
+    @staticmethod
     def list_drive_invites(folder_hash: str, owner: str | None) -> Request:
         """Build ``GET /v1/drives/{folder_hash}/invites``.
 
