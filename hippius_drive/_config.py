@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ ENV_SERVER = "HIPPIUS_SERVER_URL"
 ENV_MNEMONIC_FILE = "HIPPIUS_MNEMONIC_FILE"
 ENV_LABEL = "HIPPIUS_FOLDER_LABEL"
 ENV_PASSWORD = "HIPPIUS_PASSWORD"  # noqa: S105 - the variable name, not a password
+ENV_API_URL = "HIPPIUS_API_URL"
 
 DEFAULT_LABEL = "default"
 CONFIG_DIR = Path.home() / ".config" / "hippius-drive"
@@ -157,3 +160,50 @@ def load(
     if "mnemonic_file" in merged:
         merged["mnemonic_file"] = Path(merged["mnemonic_file"]).expanduser()
     return replace(Config(), **merged)
+
+
+def save(updates: Mapping[str, str | None], *, config_path: Path | None = None) -> Path:
+    """Write ``updates`` into the config file, keeping its other settings.
+
+    The file can hold the API token, so it is written owner-only (0600),
+    atomically, and its directory is created owner-only.
+
+    Args:
+        updates: Settings to set; keys must be config fields. None removes one.
+        config_path: The config file; the default location when omitted.
+
+    Returns:
+        The path written.
+
+    Raises:
+        ConfigError: If a key is unknown or the existing file cannot be read.
+    """
+    path = config_path if config_path is not None else CONFIG_PATH
+    unknown = set(updates) - set(_FIELDS)
+    if unknown:
+        raise ConfigError(f"not a config setting: {', '.join(sorted(unknown))}")
+    merged = {key: str(value) for key, value in _from_file(path).items()}
+    for key, value in updates.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    body = "".join(f"{key} = {_toml_string(value)}\n" for key, value in sorted(merged.items()))
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".toml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _toml_string(value: str) -> str:
+    """A TOML basic string. Control characters are refused, not escaped."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):  # noqa: PLR2004
+        raise ConfigError("config values cannot contain control characters")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'

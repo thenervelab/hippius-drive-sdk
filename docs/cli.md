@@ -46,9 +46,39 @@ hippius-drive init
 Generates a 24-word phrase, writes it encrypted, and **prints it once**. That is
 the only time it is shown. Store it offline.
 
-`--mnemonic "word word ..."` imports an existing phrase instead — and does not
-echo it. `--force` overwrites an existing file; without it, `init` refuses
+`--phrase-file PATH` imports an existing phrase from an owner-only file (`-`
+reads stdin) and does not echo it. `--mnemonic "word word ..."` does the same
+from the command line, where the phrase lands in shell history and `ps`; prefer
+the file. `--force` overwrites an existing file; without it, `init` refuses
 rather than destroying the only copy of a phrase.
+
+For an account that signs in with a 12-word access key, import the access key
+itself: the console uses it as that account's Drive phrase too.
+
+## Signing in without a browser
+
+```bash
+pip install 'hippius-drive[login]'
+hippius-drive auth login --phrase-file ~/.secrets/access-key   # or: --phrase-file - < file
+hippius-drive auth login                                       # unlock the encrypted mnemonic file
+hippius-drive auth login --phrase-file - --token-file ~/.secrets/hippius-token
+```
+
+`auth login` signs the API's challenge with the two keys an access key stands
+for (sr25519 and secp256k1, exactly as the console's access-key sign-in does)
+and saves the account's API token and address to the config file, written
+owner-only (0600). With `--token-file` the token goes to that file instead,
+also 0600. Neither the phrase nor the token is ever printed. A phrase file that
+other users can read is refused.
+
+The first sign-in with a new access key creates the account. That account has
+no Drive plan of its own; it can still join a shared drive, whose owner pays.
+The token does not expire, but it is the account's only token: signing out in
+the console deletes it. On a 401, run `auth login` again. `--api` (or
+`HIPPIUS_API_URL`) points it at another API origin.
+
+The signing libraries are native wheels, so they ship as the `login` extra
+rather than with every install.
 
 ```bash
 hippius-drive whoami

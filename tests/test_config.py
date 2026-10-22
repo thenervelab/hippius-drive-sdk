@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 
@@ -101,3 +102,46 @@ def test_empty_strings_in_the_file_and_flags_are_treated_as_unset(tmp_path: Path
     cfg = _config.load({"token": "  "}, environ={}, config_path=path)
     assert cfg.token == "from-file"
     assert cfg.password is None
+
+
+def test_save_merges_into_the_file_owner_only(tmp_path: Path) -> None:
+    path = tmp_path / "conf" / "config.toml"
+    path.parent.mkdir()
+    path.write_text('label = "photos"\nserver_url = "https://s.example"\n')
+    written = _config.save(
+        {"token": 'quote"back\\slash', "account_ss58": "5Acct"}, config_path=path
+    )
+    assert written == path
+    cfg = _config.load({}, environ={}, config_path=path)
+    assert (cfg.token, cfg.account_ss58, cfg.label) == ('quote"back\\slash', "5Acct", "photos")
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o600
+    assert [p.name for p in path.parent.iterdir()] == ["config.toml"]
+
+
+def test_save_creates_the_directory(tmp_path: Path) -> None:
+    path = tmp_path / "new" / "config.toml"
+    _config.save({"token": "t"}, config_path=path)
+    assert _config.load({}, environ={}, config_path=path).token == "t"
+
+
+def test_save_refuses_unknown_keys_and_control_characters(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    with pytest.raises(_config.ConfigError, match="not a config setting"):
+        _config.save({"nope": "x"}, config_path=path)
+    with pytest.raises(_config.ConfigError, match="control"):
+        _config.save({"token": "a\nb"}, config_path=path)
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_failed_write_leaves_no_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    with pytest.raises(OSError, match="disk full"):
+        _config.save({"token": "t"}, config_path=tmp_path / "config.toml")
+    assert list(tmp_path.iterdir()) == []
