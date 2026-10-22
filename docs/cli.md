@@ -124,6 +124,24 @@ hippius-drive put report-v2.pdf work/report.pdf \
   --base-revision <hex> --revision-seq 2
 ```
 
+`put` never replaces an existing file silently. Onto an existing path it fails
+with exit code 3 and says to pass `--overwrite`. `--overwrite` reads the file's
+current revision and quotes it, so the upload is a compare-and-swap: if another
+writer (another agent, say) changed the file in between, the upload fails with
+exit code 3 instead of clobbering their version, and you can rerun. A file
+that was moved or deleted after the read also exits 3, with a message saying
+so: rerunning would recreate it, so look first. A file the desktop app stored
+under an NFD name has another id and is refused rather than duplicated. There
+is no version history on the server, so the replaced revision is gone.
+
+```bash
+hippius-drive put report.pdf work/report.pdf --overwrite
+hippius-drive mkdir work/drafts work/archive    # empty directories; existing ones are fine
+```
+
+`mkdir` is only needed for a directory that should show while empty: an upload
+into a path whose directory does not exist yet creates it implicitly.
+
 `mv` looks the current revision up for you, so it needs no flags.
 
 `ls` shows directories first with recursive byte totals, then files. With no
@@ -221,7 +239,8 @@ library calls.
 
 ## Errors
 
-Failures print one line and exit 1 — no traceback. That includes a batch `rm`
+Failures print one line and exit 1 — no traceback; a `put` that loses to the
+server's current revision exits 3. That includes a batch `rm`
 where some ids failed (HTTP 200 with per-id `errors`). A rejected input (a path
 containing `..`, a batch over the 1000-id cap, a replacement missing its
 `revision_seq`) is reported the same way, because from the command line those

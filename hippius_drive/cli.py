@@ -482,22 +482,128 @@ def _ls_line(row: dict[str, Any]) -> str:
     return f"{line}  (by {uploader})" if uploader else line
 
 
+class ConflictExit(click.ClickException):
+    """A write lost to the server's current revision. Exit code 3, so scripts can tell."""
+
+    exit_code = 3
+
+
 @main.command()
 @click.argument("local", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("remote")
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Replace REMOTE if it exists, quoting the revision just read. A write "
+    "that lands in between still fails rather than being clobbered.",
+)
 @click.option("--base-revision", default=None, help="Hex revision this write replaces.")
 @click.option("--revision-seq", type=int, default=None, help="Current revision_seq plus one.")
 @click.pass_obj
 def put(
-    obj: Context, local: Path, remote: str, base_revision: str | None, revision_seq: int | None
+    obj: Context,
+    local: Path,
+    remote: str,
+    overwrite: bool,
+    base_revision: str | None,
+    revision_seq: int | None,
 ) -> None:
-    """Encrypt and upload LOCAL to the folder-relative path REMOTE."""
+    """Encrypt and upload LOCAL to the folder-relative path REMOTE.
+
+    An existing REMOTE is never replaced silently: without --overwrite (or an
+    explicit --base-revision) the upload fails with exit code 3. With it, the
+    write is a compare-and-swap on the revision it read, so two writers racing
+    on one path cannot clobber each other; the loser exits 3 and can rerun.
+    """
+    if overwrite and (base_revision or revision_seq is not None):
+        raise click.ClickException("--overwrite looks the revision up; drop --base-revision")
     base = bytes.fromhex(base_revision) if base_revision else None
     with obj.client() as client:
-        result = client.files.put(local, remote, base_revision_id=base, revision_seq=revision_seq)
+        if overwrite:
+            result, replaced = _overwrite(client, local, remote)
+        else:
+            result, replaced = _put_once(client, local, remote, base, revision_seq), base
         file_id = client.files.file_id(remote)
     click.echo(f"file_id      {file_id}")
     click.echo(f"revision_id  {result.revision_id.hex()}")
+    if overwrite:
+        click.echo(f"replaced     {'yes' if replaced is not None else 'no, new file'}")
+
+
+def _overwrite(client: Client, local: Path, remote: str) -> tuple[Any, bytes | None]:
+    """Replace ``remote`` by compare-and-swap; returns the result and the replaced revision.
+
+    The base is the revision the listing shows. A path whose row the listing
+    does not show (no stored path) or that someone created since answers the
+    create with a 409 naming its current revision; that revision is quoted
+    once more, still as a compare-and-swap. Anything after that is a race the
+    caller has to look at.
+    """
+    current = client.files.lookup(remote)
+    base, seq = None, None
+    if current is not None:
+        if current.file_id != client.files.file_id(remote):
+            raise click.ClickException(
+                f"{remote} was stored by the desktop app under another id (an NFD name); "
+                "replace it there, or rm it first"
+            )
+        base, seq = current.revision_id, current.revision_seq + 1
+    try:
+        return client.files.put(local, remote, base_revision_id=base, revision_seq=seq), base
+    except errors.Conflict as exc:
+        if base is not None or not _names_a_revision(exc):
+            raise ConflictExit(_conflict_message(remote, exc, replacing=base is not None)) from exc
+        base, seq = exc.current_revision_id, (exc.current_revision_seq or 0) + 1
+    return _put_once(client, local, remote, base, seq), base
+
+
+def _put_once(client: Client, local: Path, remote: str, base: bytes | None, seq: int | None) -> Any:
+    try:
+        return client.files.put(local, remote, base_revision_id=base, revision_seq=seq)
+    except errors.Conflict as exc:
+        raise ConflictExit(_conflict_message(remote, exc, replacing=base is not None)) from exc
+
+
+def _names_a_revision(exc: errors.Conflict) -> bool:
+    """True when the 409 reports a live row: a non-zero revision and its sequence."""
+    revision = exc.current_revision_id
+    return revision is not None and any(revision) and exc.current_revision_seq is not None
+
+
+def _says_gone(exc: errors.Conflict) -> bool:
+    """True for hcfs's gone-file answers: ``target_gone``, or the all-zero revision.
+
+    A 409 with no revision at all is not one of them: hcfs sends that when it
+    could not re-read the row, which says nothing about the file being gone.
+    """
+    revision = exc.current_revision_id
+    return exc.code == "target_gone" or (revision is not None and not any(revision))
+
+
+def _conflict_message(remote: str, exc: errors.Conflict, *, replacing: bool) -> str:
+    if _names_a_revision(exc):
+        if replacing:
+            return f"{remote} changed since it was read; rerun to replace the newer version"
+        return f"{remote} already exists; pass --overwrite to replace it"
+    if _says_gone(exc):
+        return f"{remote} was moved or deleted since it was read; check before uploading again"
+    # Session-state 409s (a chunked upload already running, say) are not
+    # about the file's revision at all.
+    return f"{remote}: the server refused the upload: {exc}"
+
+
+@main.command()
+@click.argument("paths", nargs=-1, required=True)
+@click.pass_obj
+def mkdir(obj: Context, paths: tuple[str, ...]) -> None:
+    """Create directories, so they show in listings while still empty.
+
+    Existing directories are fine. A file can also be uploaded straight into a
+    directory that does not exist yet; mkdir is for empty ones.
+    """
+    with obj.client() as client:
+        result = client.folders.make_dirs(list(paths))
+    click.echo(result.status)
 
 
 @main.command()

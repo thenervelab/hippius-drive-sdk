@@ -7,7 +7,7 @@ it. An :class:`Op` is inert; nothing happens until a transport runs it.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 from hippius_drive import errors, models
 from hippius_drive._upload import TRANSPORT_CHUNK, PreparedUpload
 from hippius_drive._wire import Request, build
-from hippius_drive.crypto import kdf
+from hippius_drive.crypto import hashes, kdf
 from hippius_drive.identity import Identity, rename_text
 from hippius_drive.models import BrowseOptions, SearchFilters
 
@@ -135,6 +135,42 @@ def health() -> Op[models.HealthResult]:
         The operation.
     """
     return Op(build.health(), _parser(models.HealthResult))
+
+
+MAX_FOLDER_ENTRIES_BATCH = 500
+"""Directory paths one ``/register_folder_entries`` request may carry."""
+
+
+def register_folder_entries(
+    identity: Identity, paths: Sequence[str]
+) -> Op[models.RegisterFolderResult]:
+    """Create directories so they show in listings while still empty.
+
+    Only the named paths are sent, not their parents: a listing already shows
+    ``a`` once ``a/b`` exists, and a folder-grant writer may not name a path
+    outside its folder, which a parent of the granted folder is.
+
+    Args:
+        identity: The account and folder identity. A reader cannot.
+        paths: Drive-relative directory paths. Existing ones are a no-op.
+
+    Returns:
+        The operation.
+
+    Raises:
+        ValueError: If a path breaks hcfs's path rules, ``paths`` is a bare
+            string, there are none or more than 500, or the caller is a reader.
+    """
+    identity.require_writer()
+    if isinstance(paths, str):
+        raise ValueError("pass a list of directories, not one string")
+    wanted = list(dict.fromkeys(hashes.validate_stored_path(path) for path in paths))
+    if not wanted:
+        raise ValueError("give at least one directory")
+    if len(wanted) > MAX_FOLDER_ENTRIES_BATCH:
+        raise ValueError(f"at most {MAX_FOLDER_ENTRIES_BATCH} directories per call")
+    request = build.register_folder_entries(identity.account_ss58, identity.folder_hash, wanted)
+    return Op(request, _parser(models.RegisterFolderResult))
 
 
 def list_folder_entries(identity: Identity) -> Op[models.ListFolderEntriesResult]:

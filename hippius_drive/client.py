@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator, Iterator
+import unicodedata
+from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
 from types import TracebackType
@@ -220,6 +221,19 @@ class FolderOps:
         """List the registered empty-directory paths for this folder."""
         return self._client.run(_ops.list_folder_entries(self._client.identity))
 
+    def make_dirs(self, paths: Sequence[str]) -> models.RegisterFolderResult:
+        """Create directories, so they show in listings while still empty.
+
+        Existing directories are a no-op. Readers cannot.
+
+        Args:
+            paths: Drive-relative directory paths, at most 500.
+
+        Returns:
+            ``registered`` on success.
+        """
+        return self._client.run(_ops.register_folder_entries(self._client.identity, paths))
+
 
 class SummaryOps:
     """Account-level storage summaries.
@@ -317,6 +331,35 @@ class FileOps:
         """
         opts = _browse_options(path, options)
         return self._client.run(_ops.browse(self._client.identity, opts, offset, limit))
+
+    def lookup(self, relative_path: str) -> models.RemoteFileEntry | None:
+        """Return the file at ``relative_path`` as the server has it, or None.
+
+        Walks the parent directory's listing, so it reads only that level and
+        works for a folder-grant member. The entry carries the ``revision_id``
+        and ``revision_seq`` a replacement must quote. A row with no plaintext
+        path does not appear in listings and reads as absent here. A row the
+        desktop app created from an NFD name matches by path, but its
+        ``file_id`` then differs from :meth:`file_id`: replacing it needs that
+        row's own id, which an upload by path cannot send.
+
+        Args:
+            relative_path: The file's path in the folder.
+
+        Returns:
+            The entry, or None when no listed file has that path.
+
+        Raises:
+            ValueError: If ``relative_path`` is not a clean relative path.
+        """
+        wanted = self.file_id(relative_path)
+        found = [
+            entry
+            for entry in self.iter_browse(_parent_dir(relative_path))
+            if isinstance(entry, models.RemoteFileEntry)
+            and _same_file(entry, wanted, relative_path)
+        ]
+        return _best_match(found, wanted)
 
     def iter_browse(
         self,
@@ -741,6 +784,10 @@ class AsyncFolderOps:
         """List the registered empty-directory paths for this folder."""
         return await self._client.run(_ops.list_folder_entries(self._client.identity))
 
+    async def make_dirs(self, paths: Sequence[str]) -> models.RegisterFolderResult:
+        """Async twin of :meth:`FolderOps.make_dirs`."""
+        return await self._client.run(_ops.register_folder_entries(self._client.identity, paths))
+
 
 class AsyncSummaryOps:
     """Account-level storage summaries, async."""
@@ -830,6 +877,17 @@ class AsyncFileOps:
         """
         opts = _browse_options(path, options)
         return await self._client.run(_ops.browse(self._client.identity, opts, offset, limit))
+
+    async def lookup(self, relative_path: str) -> models.RemoteFileEntry | None:
+        """Async twin of :meth:`FileOps.lookup`."""
+        wanted = self.file_id(relative_path)
+        found = [
+            entry
+            async for entry in self.iter_browse(_parent_dir(relative_path))
+            if isinstance(entry, models.RemoteFileEntry)
+            and _same_file(entry, wanted, relative_path)
+        ]
+        return _best_match(found, wanted)
 
     async def iter_browse(
         self,
@@ -1145,3 +1203,29 @@ class AsyncClient:
     ) -> None:
         """Close the connection pool on the way out."""
         await self.aclose()
+
+
+def _parent_dir(relative_path: str) -> str:
+    """The directory a file's listing lives in; "" for the folder root.
+
+    NFC is enough: hcfs stores ``relative_path`` only in NFC (its path
+    validator refuses anything else), so a desktop row from an NFD name
+    differs in ``path_hash``, never in the listed path or its directory.
+    """
+    return hashes.normalize_relative_path(relative_path).rpartition("/")[0]
+
+
+def _best_match(found: list[models.RemoteFileEntry], wanted: str) -> models.RemoteFileEntry | None:
+    """The exact-id row when there is one, else the first same-path row."""
+    exact = [entry for entry in found if entry.file_id == wanted]
+    return (exact or found or [None])[0]
+
+
+def _same_file(entry: models.RemoteFileEntry, wanted: str, relative_path: str) -> bool:
+    """True for the listed file at ``relative_path``, matched by id or by path."""
+    if entry.file_id == wanted:
+        return True
+    listed = entry.relative_path
+    return listed is not None and unicodedata.normalize("NFC", listed) == (
+        hashes.normalize_relative_path(relative_path)
+    )
