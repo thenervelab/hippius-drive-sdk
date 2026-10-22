@@ -15,6 +15,7 @@ __all__ = [
     "Gone",
     "InvalidRequest",
     "InvalidResponse",
+    "MemberLimitReached",
     "NotFound",
     "PayloadTooLarge",
     "QuotaExceeded",
@@ -144,6 +145,33 @@ class QuotaExceeded(DriveError):
 
 class Forbidden(DriveError):
     """403: the token is valid but resolves to a different account."""
+
+
+class MemberLimitReached(Forbidden):
+    """403 ``drive_member_limit_reached``: the drive is full, or the owner's plan admits nobody.
+
+    The invite stays live and no use is consumed, so the same accept can
+    succeed once the owner frees a seat or upgrades.
+
+    Attributes:
+        member_limit: The drive's member limit, when the server sent it.
+    """
+
+    retryable = True
+
+    def __init__(
+        self, code: str, message: str, status: int | None = None, *, member_limit: int | None
+    ) -> None:
+        """Build the error.
+
+        Args:
+            code: ``drive_member_limit_reached``.
+            message: The server's explanation.
+            status: 403.
+            member_limit: The limit, when the server sent it.
+        """
+        super().__init__(code, message, status)
+        self.member_limit = member_limit
 
 
 class NotFound(DriveError):

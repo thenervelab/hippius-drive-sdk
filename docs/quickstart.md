@@ -263,6 +263,7 @@ Every failure the service, the transport or the decrypt step reports is a
 |---|---|---|
 | `Unauthorized` | 401 | Token missing, malformed or rejected |
 | `Forbidden` | 403 | Token resolves to a different account than the request names |
+| `MemberLimitReached` | 403 | `Forbidden` subclass: the drive is full; the invite stays live, retry later. Carries `member_limit` |
 | `QuotaExceeded` | 402 | Over the plan allowance; carries the credit figures when given |
 | `NotFound` | 404 | No such file, folder, share, or session |
 | `Gone` | 410 | Invite revoked, expired, or exhausted |
