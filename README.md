@@ -5,10 +5,14 @@ Files are encrypted and signed on your machine; the server only ever holds
 ciphertext and cannot read your data.
 
 Pure Python — no Rust toolchain, no compiled extension, and the crypto is
-readable in this repository rather than shipped as a binary.
+readable in this repository rather than shipped as a binary. (The optional
+`login` extra adds native signing wheels; the core install never imports them.)
+
+It is not published on PyPI. Install from this repository:
 
 ```bash
-pip install hippius-drive
+pip install "git+https://github.com/thenervelab/hippius-drive-sdk"
+pip install "hippius-drive[login] @ git+https://github.com/thenervelab/hippius-drive-sdk"   # plus access-key sign-in
 ```
 
 Python 3.10 to 3.13.
@@ -18,7 +22,7 @@ Python 3.10 to 3.13.
 You need an API token and the account address it belongs to, from the
 [Hippius console](https://console.hippius.com), or, for an access-key account,
 from `hippius_drive.auth.login(access_key)` / `hippius-drive auth login` with
-no browser (`pip install 'hippius-drive[login]'`). You also need a recovery
+no browser (install with the `login` extra, see above). You also need a recovery
 phrase, which the SDK can generate for you and which never leaves your machine.
 
 ```python
