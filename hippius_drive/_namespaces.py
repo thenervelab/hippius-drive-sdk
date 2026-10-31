@@ -11,7 +11,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 
@@ -279,7 +279,9 @@ class FolderShareOps:
         """Upload wraps so another device can rebuild these folder-share URLs.
 
         The wrap carries the plaintext token, because the listing returns only
-        ``token_hash``.
+        ``token_hash``. Take each secret from the minted URL,
+        ``sharing.parse_share_url(created.share_url).secret``: a secret built
+        from the drive key would rebuild as a ``#k=`` URL that carries it.
 
         Args:
             master_mnemonic: The minter's master phrase.
@@ -342,7 +344,7 @@ class FolderShareOps:
         if not caps.folder_share_revoke_by_hash:
             raise ValueError("this server does not address folder shares by token_hash")
 
-    def _revoke_unopenable(self, token: str) -> None:
+    def _revoke_unopenable(self, token: str) -> NoReturn:
         try:
             self._client.run(_ops.revoke_folder_share(token))
         except errors.DriveError as exc:
@@ -678,7 +680,7 @@ class AsyncFolderShareOps:
         if not caps.folder_share_revoke_by_hash:
             raise ValueError("this server does not address folder shares by token_hash")
 
-    async def _revoke_unopenable(self, token: str) -> None:
+    async def _revoke_unopenable(self, token: str) -> NoReturn:
         try:
             await self._client.run(_ops.revoke_folder_share(token))
         except errors.DriveError as exc:

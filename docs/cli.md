@@ -193,8 +193,8 @@ hippius-drive folder-share ls
 hippius-drive folder-share rm TOKEN                          # token or 64-hex token_hash
 ```
 
-`share put` and `folder-share put` print one console URL. That URL is the
-decryption key. `--console` changes the origin; it defaults to
+`share put` and `folder-share put` print one console URL. That URL opens
+the content for anyone who holds it; treat it as a secret. `--console` changes the origin; it defaults to
 `https://console.hippius.com` and is separate from `--server`. A `--password`
 of at least 8 characters produces a `#p=` file link or a `#sp=` folder link.
 A folder link without a password is `#s=`.

@@ -48,8 +48,11 @@ def test_file_share_round_trip_and_revoke(client: Client) -> None:
 def test_folder_share_link_secret_round_trip_and_revoke(
     client: Client, password: str | None
 ) -> None:
-    client.files.put_bytes(_PAYLOAD, "e2e-folder-share/a.txt")
-    spec = FolderShareSpec("e2e-folder-share", "SDK e2e", password=password)
+    # One folder per case: the session fixture shares one drive, and a second
+    # put to the same path without a base revision is a 409.
+    prefix = "e2e-folder-share-pw" if password else "e2e-folder-share"
+    client.files.put_bytes(_PAYLOAD, f"{prefix}/a.txt")
+    spec = FolderShareSpec(prefix, "SDK e2e", password=password)
     created = client.folder_shares.create(spec)
     try:
         secret = sharing.parse_share_url(created.share_url).secret
@@ -59,7 +62,7 @@ def test_folder_share_link_secret_round_trip_and_revoke(
         data = client.folder_shares.get(created.share_url, "a.txt", password=password)
         assert data == _PAYLOAD
         listed = [row for row in client.folder_shares.list() if row.revoked_at is None]
-        assert any(row.path_prefix == "e2e-folder-share" for row in listed)
+        assert any(row.path_prefix == prefix for row in listed)
         client.folder_shares.revoke(created.share_token)
         with pytest.raises(errors.NotFound):
             client.folder_shares.get(created.share_url, "a.txt", password=password)

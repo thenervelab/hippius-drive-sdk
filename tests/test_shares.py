@@ -359,3 +359,25 @@ async def test_async_folder_link_mint_and_open_match_the_sync_client(client: Cli
     with pytest.raises(InvalidResponse, match="envelope"):
         await aclient.folder_shares.create(FolderShareSpec("", "All"))
     await aclient.aclose()
+
+
+@respx.mock
+def test_a_password_link_secret_url_proves_the_unwrapped_secret(client: Client) -> None:
+    link_secret = bytes(range(32, 64))
+    envelope = folder_link.seal_envelope(link_secret, client.identity.encryption_key)
+    wrapped = sharing.wrap_share_key("hunter2-hunter2", link_secret)
+    secret = sharing.ShareSecret(wrapped, private=True, link_secret=True)
+    url = sharing.share_url(DEFAULT_CONSOLE, "fold", secret, folder=True)
+    link_key = respx.get(f"{BASE}/v1/folder-shares/fold/link-key").mock(
+        return_value=httpx.Response(200, json={"envelope": base64.b64encode(envelope).decode()})
+    )
+    blob = file_cipher.encrypt_bytes(b"doc", client.identity.encryption_key)
+    respx.get(url__regex=r".*/folder-shares/fold/blob").mock(
+        return_value=httpx.Response(200, content=blob)
+    )
+
+    with pytest.raises(ValueError, match="password"):
+        client.folder_shares.get(url, "a.txt")
+    assert client.folder_shares.get(url, "a.txt", password="hunter2-hunter2") == b"doc"
+    proof = link_key.calls.last.request.headers["x-hcfs-link-proof"]
+    assert proof == folder_link.fetch_proof(link_secret)

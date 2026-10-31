@@ -215,12 +215,13 @@ def _exercise(client: Client) -> None:
     applied = client.shares.put_owner_wraps(MASTER, [("tok", secret)])
     assert applied.applied == 1
     folder = client.folder_shares.create(FolderShareSpec("work", "Work", ttl=ShareTtl.DAYS_7))
+    link = ShareSecret(bytes(32), link_secret=True)
     assert folder.share_token == "fold"
     assert client.folder_shares.list() == []
     client.folder_shares.revoke("fold")
     assert client.folder_shares.update_ttl("ab" * 32, "never") == "later"
     client.folder_shares.revoke("ab" * 32)
-    client.folder_shares.put_owner_wraps(MASTER, [("foldtok", secret)])
+    client.folder_shares.put_owner_wraps(MASTER, [("foldtok", link)])
     key = client.identity.encryption_key
     url = sharing.folder_share_url("https://console.hippius.com", "fold", key)
     blob = file_cipher.encrypt_bytes(b"doc", key)
@@ -263,12 +264,13 @@ async def test_async_owner_management_routes() -> None:
     applied = await client.shares.put_owner_wraps(MASTER, [("tok", secret)])
     assert applied.applied == 1
     folder = await client.folder_shares.create(FolderShareSpec("work", "Work"))
+    link = ShareSecret(bytes(32), link_secret=True)
     assert folder.share_token == "fold"
     assert await client.folder_shares.list() == []
     await client.folder_shares.revoke("fold")
     assert await client.folder_shares.update_ttl("ab" * 32, "never") == "later"
     await client.folder_shares.revoke("ab" * 32)
-    await client.folder_shares.put_owner_wraps(MASTER, [("foldtok", secret)])
+    await client.folder_shares.put_owner_wraps(MASTER, [("foldtok", link)])
     key = client.identity.encryption_key
     url = sharing.folder_share_url("https://console.hippius.com", "fold", key)
     blob = file_cipher.encrypt_bytes(b"doc", key)

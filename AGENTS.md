@@ -244,7 +244,8 @@ formats the console and desktop client already use.
   drive key. Opening it fetches the drive file key from the server, so anyone
   who opens it holds that key. Older `#k=` / `#p=` links carry the key itself;
   the server no longer mints them (`link_envelope_required`). A shared-drive
-  invite gives the member that same file key. It does not give them the owner's master phrase.
+  invite gives the member the drive file key too, not the owner's master
+  phrase.
 - File **contents** are encrypted on the machine (XChaCha20-Poly1305 frames).
   Paths, names, sizes, and timestamps are visible to the server. Use opaque
   names for anything sensitive. Full model: [docs/security.md](docs/security.md).
