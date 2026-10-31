@@ -2367,16 +2367,75 @@ def test_a_tree_prefix_of_slash_is_refused(env: dict[str, str], tmp_path: Path) 
 def test_get_recursive_reports_a_file_that_cannot_be_written(
     env: dict[str, str], tmp_path: Path
 ) -> None:
-    _state_with([_row("a"), _row("a/b")])
-    for path in ["a", "a/b"]:
-        file_id = hashes.path_hash(path).hex()
-        respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
-            return_value=httpx.Response(200, content=file_cipher.encrypt_bytes(b"x", key()))
-        )
-    result = run(["get", "-r", "", str(tmp_path / "out")], env)
+    _state_with([_row("a")])
+    _downloads({"a": b"x"})
+    dest = tmp_path / "out"
+    (dest / "a").mkdir(parents=True)
+    result = run(["get", "-r", "", str(dest)], env)
     assert result.exit_code == 1
     assert "cannot write" in result.output
     assert "Traceback" not in result.output
+
+
+@respx.mock
+def test_get_recursive_refuses_a_file_that_is_also_a_directory(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    files = {"a": b"file", "a/b": b"bravo", "c": b"charlie"}
+    _state_with([_row(path) for path in files])
+    routes = _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    assert "refused   a is a local directory for a/b" in result.stderr
+    assert routes["a"].calls == []
+    assert (dest / "a" / "b").read_bytes() == b"bravo"
+    assert (dest / "c").read_bytes() == b"charlie"
+    assert "downloaded 2, refused 1" in result.output
+
+
+@pytest.mark.skipif(sys.platform == "linux", reason="Linux disks are case-sensitive")
+@respx.mock
+def test_get_recursive_refuses_a_file_that_is_a_directory_in_another_case(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    files = {"A": b"file", "a/b": b"bravo"}
+    _state_with([_row(path) for path in files])
+    routes = _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    assert "refused   A is a local directory for a/b" in result.stderr
+    assert routes["A"].calls == []
+    assert (dest / "a" / "b").read_bytes() == b"bravo"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows forbids these names")
+@respx.mock
+def test_get_recursive_refuses_names_windows_cannot_hold(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    files = {
+        "aux/a:b": b"stream",
+        "aux/q?.txt": b"query",
+        "aux/con.txt": b"device",
+        "aux/LPT1/x": b"device dir",
+        "aux/COM\u00b9": b"superscript",
+        "aux/.../y": b"dots",
+        "aux/ok.txt": b"fine",
+    }
+    # The prefix is a device name too, but it is not part of any local name.
+    _state_with([_row(path) for path in files])
+    routes = _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "aux", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    assert "aux/a:b has ':', which a Windows file name cannot hold" in result.stderr
+    assert "aux/con.txt has 'con.txt', a reserved Windows device name" in result.stderr
+    assert "aux/.../y has '...', which Windows reads as no name" in result.stderr
+    assert all(routes[path].calls == [] for path in files if path != "aux/ok.txt")
+    assert [p.name for p in dest.iterdir()] == ["ok.txt"]
+    assert "downloaded 1, refused 6" in result.output
 
 
 def test_get_recursive_refuses_a_file_as_dest(env: dict[str, str], tmp_path: Path) -> None:
