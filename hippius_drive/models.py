@@ -694,6 +694,10 @@ class Capabilities(_Wire):
         share_owner_wrap: Owner-wrap upload is mounted.
         member_folder_shares: A member may mint a folder share on a shared drive.
         drive_invite_link_envelopes: The server opens ``#i=`` link-secret invites.
+        share_insights: File-share settings and insights routes are mounted.
+        share_comments: File-share comment and reaction routes are mounted.
+        share_comment_replies: A comment may name a ``parent_id``. Without it
+            the server ignores the field and stores a top-level comment.
     """
 
     shares: bool = False
@@ -702,6 +706,9 @@ class Capabilities(_Wire):
     share_owner_wrap: bool = False
     member_folder_shares: bool = False
     drive_invite_link_envelopes: bool = False
+    share_insights: bool = False
+    share_comments: bool = False
+    share_comment_replies: bool = False
 
 
 class ExpiryResult(_Wire):
@@ -727,6 +734,192 @@ class MintedShare(_Wire):
     expires_at: str | None = None
 
 
+class ShareSettings(_Wire):
+    """A file share's switches, from ``PATCH /v1/shares/{token}/settings`` or the listing.
+
+    All three start off. ``comments`` and ``reactions`` govern posting only:
+    what is already there stays readable while they are off.
+
+    Attributes:
+        insights: The share page records views.
+        comments: Viewers may post comments.
+        reactions: Viewers may react.
+    """
+
+    insights: bool = False
+    comments: bool = False
+    reactions: bool = False
+
+
+class ShareCounts(_Wire):
+    """A file share's numbers in the owner's listing.
+
+    Attributes:
+        views: Visits.
+        unique_viewers: Distinct viewers.
+        comments: Comments, anonymous ones included.
+        reactions: Reactions, every emoji summed.
+        new_views: Visits since the owner last opened the link's insights.
+        new_comments: Comments since then.
+    """
+
+    views: int = 0
+    unique_viewers: int = 0
+    comments: int = 0
+    reactions: int = 0
+    new_views: int = 0
+    new_comments: int = 0
+
+
+class ShareViewer(_Wire):
+    """One viewer in paid-plan insights. ``viewer_id`` is a per-link pseudonym.
+
+    Attributes:
+        viewer_id: Not the id the page sent, so viewers cannot be followed
+            across links.
+        visits: Visits by this viewer.
+        watched_ms: Watch time summed over the visits.
+        completion: Share of the video seen over all visits; None for an image.
+        last_viewed_at: RFC 3339.
+        comments: Named comments posted from this viewer's page.
+        reactions: Always 0: reactions carry no viewer id.
+        name_ct: Standard base64 of the encrypted name, or None.
+        name_nonce: Its nonce.
+        name: The decrypted name. Filled by the SDK when the call had the
+            link's key and the name opened; the server never sends it.
+    """
+
+    viewer_id: str = ""
+    visits: int = 0
+    watched_ms: int = 0
+    completion: float | None = None
+    last_viewed_at: str = ""
+    comments: int = 0
+    reactions: int = 0
+    name_ct: str | None = None
+    name_nonce: str | None = None
+    name: str | None = None
+
+
+class ShareInsights(_Wire):
+    """``GET /v1/shares/{token}/insights``.
+
+    On the free Drive plan only the counts are sent and ``locked`` names the
+    rest; the locked values are not computed. A paid plan gets everything.
+    The server answers with the free view when it cannot read the plan.
+
+    Attributes:
+        plan: ``free`` or ``paid``.
+        total_views: Visits.
+        unique_viewers: Distinct viewers.
+        completion_rate: Mean completion of video visits; None for an image,
+            with no video visit, or on the free plan.
+        retention: 100 integer percentages, one per 1% of the video. Empty
+            for an image or on the free plan.
+        viewers: Most recent first. Empty on the free plan.
+        locked: Names of the values the plan does not include.
+    """
+
+    plan: str = "free"
+    total_views: int = 0
+    unique_viewers: int = 0
+    completion_rate: float | None = None
+    retention: list[int] = []
+    viewers: list[ShareViewer] = []
+    locked: list[str] = []
+
+
+class CommentRow(_Wire):
+    """One entry of ``GET /v1/shares/{token}/comments``, still encrypted.
+
+    A deleted top-level comment that still has replies is a stand-in with
+    ``deleted`` true and no ciphertext.
+    """
+
+    id: str
+    parent_id: str | None = None
+    at_ms: int | None = None
+    created_at: str | None = None
+    ciphertext: str | None = None
+    nonce: str | None = None
+    anonymous: bool = False
+    mine: bool = False
+    owner: bool = False
+    blocked: bool = False
+    deleted: bool = False
+
+
+class CommentPage(_Wire):
+    """One page of a link's comments, oldest first.
+
+    Attributes:
+        comments: Up to 100 entries.
+        next_after: Cursor for the next page; None on the last.
+    """
+
+    comments: list[CommentRow] = []
+    next_after: str | None = None
+
+
+class PostedComment(_Wire):
+    """``201`` from ``POST /v1/shares/{token}/comments``.
+
+    Attributes:
+        id: The comment id, a decimal string.
+        created_at: RFC 3339.
+    """
+
+    id: str
+    created_at: str = ""
+
+
+class ShareReactions(_Wire):
+    """``GET /v1/shares/{token}/reactions``.
+
+    Attributes:
+        counts: Emoji to count. An emoji nobody chose is absent.
+        mine: The emoji this account chose.
+    """
+
+    counts: dict[str, int] = {}
+    mine: list[str] = []
+
+
+@dataclass(frozen=True)
+class ShareComment:
+    """A link comment, decrypted with the link's key.
+
+    Attributes:
+        id: Decimal string; what delete and replies name.
+        parent_id: The top-level comment a reply answers; None at top level.
+        at_ms: The moment of the video it points at, or None.
+        created_at: RFC 3339; None on a deleted stand-in.
+        text: The comment. None on a deleted stand-in, and when the
+            ciphertext does not open under this key (anyone signed in can
+            post bytes the key cannot read).
+        name: The name it was posted under, cleaned; None when anonymous,
+            blank, or unreadable.
+        anonymous: Posted without a name.
+        mine: Posted by this client's account.
+        owner: A named comment by the link's owner.
+        blocked: The owner blocked its author through this comment. Only the
+            owner's listing carries it.
+        deleted: A stand-in for a deleted comment that still has replies.
+    """
+
+    id: str
+    parent_id: str | None
+    at_ms: int | None
+    created_at: str | None
+    text: str | None
+    name: str | None
+    anonymous: bool
+    mine: bool
+    owner: bool
+    blocked: bool
+    deleted: bool
+
+
 class ShareSummary(_Wire):
     """One row of ``GET /v1/shares``.
 
@@ -739,6 +932,10 @@ class ShareSummary(_Wire):
         created_at: RFC 3339.
         expires_at: None when the share does not expire.
         owner_wrap: Standard base64 of the mnemonic-sealed secret, when uploaded.
+        settings: The link's insights, comments and reactions switches. None
+            from a server that predates them.
+        counts: Views, comments and reactions. None when the link has
+            insights off, or the server does not send them.
     """
 
     share_token: str
@@ -749,6 +946,8 @@ class ShareSummary(_Wire):
     created_at: str = ""
     expires_at: str | None = None
     owner_wrap: str | None = None
+    settings: ShareSettings | None = None
+    counts: ShareCounts | None = None
 
 
 class ShareMeta(_Wire):

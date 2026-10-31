@@ -17,6 +17,7 @@ __all__ = [
     "InvalidResponse",
     "MemberLimitReached",
     "NotFound",
+    "PaidPlanRequired",
     "PayloadTooLarge",
     "QuotaExceeded",
     "RateLimited",
@@ -172,6 +173,15 @@ class MemberLimitReached(Forbidden):
         """
         super().__init__(code, message, status)
         self.member_limit = member_limit
+
+
+class PaidPlanRequired(Forbidden):
+    """403 ``paid_plan_required``: the account's Drive plan is Free and this needs a paid one.
+
+    Turning on a share link's insights, comments or reactions is the case
+    today. Upgrade the Drive plan in the console, then retry. Turning a
+    switch off is never refused.
+    """
 
 
 class NotFound(DriveError):

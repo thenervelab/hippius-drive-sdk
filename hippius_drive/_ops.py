@@ -613,6 +613,64 @@ def share_blob(token: str) -> Request:
     return build.share_blob(token)
 
 
+def update_share_settings(token: str, body: dict[str, bool]) -> Op[models.ShareSettings]:
+    """Turn a file share's insights, comments, or reactions on or off.
+
+    Args:
+        token: The plaintext share token.
+        body: The switches to change.
+    """
+    return Op(build.update_share_settings(token, body), _parser(models.ShareSettings))
+
+
+def share_insights(token: str) -> Op[models.ShareInsights]:
+    """Read a file share's views and watch time.
+
+    Args:
+        token: The plaintext share token.
+    """
+    return Op(build.share_insights(token), _parser(models.ShareInsights))
+
+
+def share_comments(token: str, after: str | None) -> Op[models.CommentPage]:
+    """Read one page of a file share's encrypted comments.
+
+    Args:
+        token: The plaintext share token.
+        after: The previous page's ``next_after``, or None.
+    """
+    return Op(build.share_comments(token, after), _parser(models.CommentPage))
+
+
+def post_share_comment(token: str, body: dict[str, Any]) -> Op[models.PostedComment]:
+    """Post a sealed comment.
+
+    Args:
+        token: The plaintext share token.
+        body: Ciphertext, nonce, and the optional fields.
+    """
+    return Op(build.post_share_comment(token, body), _parser(models.PostedComment))
+
+
+def delete_share_comment(token: str, comment_id: str) -> Op[None]:
+    """Delete a comment: any on the caller's own link, or the caller's own.
+
+    Args:
+        token: The plaintext share token.
+        comment_id: The comment id.
+    """
+    return Op(build.delete_share_comment(token, comment_id), _ignored)
+
+
+def share_reactions(token: str) -> Op[models.ShareReactions]:
+    """Read a file share's reaction counts.
+
+    Args:
+        token: The plaintext share token.
+    """
+    return Op(build.share_reactions(token), _parser(models.ShareReactions))
+
+
 def put_file_owner_wraps(wraps: list[dict[str, str]]) -> Op[models.OwnerWrapsResult]:
     """Store mnemonic-sealed file-share secrets.
 

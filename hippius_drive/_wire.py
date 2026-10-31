@@ -113,6 +113,8 @@ def _raise_for(status: int, fields: dict[str, Any], retry_after: int | None) -> 
     if status == FORBIDDEN and code == "drive_member_limit_reached":
         limit = _optional_int(fields.get("member_limit"))
         raise errors.MemberLimitReached(code, message, status, member_limit=limit)
+    if status == FORBIDDEN and code == "paid_plan_required":
+        raise errors.PaidPlanRequired(code, message, status)
 
     fallback = errors.ServerError if status >= INTERNAL_SERVER_ERROR else errors.DriveError
     raise _STATUS_ERRORS.get(status, fallback)(code, message, status)
@@ -203,6 +205,16 @@ def _token(value: str) -> str:
     if not _TOKEN_RE.fullmatch(value):
         raise ValueError("token must be a base64url path segment")
     return _segment(value)
+
+
+_COMMENT_ID_RE = re.compile(r"^[1-9][0-9]*$")
+
+
+def check_comment_id(value: str) -> str:
+    """Reject a comment id that is not a positive decimal string."""
+    if not _COMMENT_ID_RE.fullmatch(value):
+        raise ValueError("comment id must be a positive decimal number")
+    return value
 
 
 def _hash64(value: str) -> str:
@@ -810,6 +822,78 @@ class RequestBuilders:
             token: The plaintext share token.
         """
         return _capability("GET", f"/v1/shares/{_token(token)}/blob", anonymous=True)
+
+    @staticmethod
+    def update_share_settings(token: str, body: dict[str, bool]) -> Request:
+        """Build ``PATCH /v1/shares/{token}/settings``.
+
+        Args:
+            token: The plaintext share token.
+            body: Any of ``insights``, ``comments``, ``reactions``.
+        """
+        return _capability("PATCH", f"/v1/shares/{_token(token)}/settings", json=body)
+
+    @staticmethod
+    def share_insights(token: str) -> Request:
+        """Build ``GET /v1/shares/{token}/insights``.
+
+        Args:
+            token: The plaintext share token.
+        """
+        return _capability("GET", f"/v1/shares/{_token(token)}/insights")
+
+    @staticmethod
+    def share_comments(token: str, after: str | None) -> Request:
+        """Build ``GET /v1/shares/{token}/comments``.
+
+        The bearer is optional on this route and is sent, so ``mine`` and the
+        owner's ``blocked`` marks come back.
+
+        Args:
+            token: The plaintext share token.
+            after: ``next_after`` from the previous page, or None for the first.
+        """
+        path = f"/v1/shares/{_token(token)}/comments"
+        return _capability("GET", path, params=_params(after=after) or None)
+
+    @staticmethod
+    def post_share_comment(token: str, body: dict[str, Any]) -> Request:
+        """Build ``POST /v1/shares/{token}/comments``.
+
+        Never replayed: a retry after a lost response would post the comment
+        twice.
+
+        Args:
+            token: The plaintext share token.
+            body: The sealed comment and its fields.
+        """
+        return Request(
+            "POST",
+            f"/v1/shares/{_token(token)}/comments",
+            json=body,
+            replayable=False,
+            redact_url=True,
+        )
+
+    @staticmethod
+    def delete_share_comment(token: str, comment_id: str) -> Request:
+        """Build ``DELETE /v1/shares/{token}/comments/{id}``.
+
+        Args:
+            token: The plaintext share token.
+            comment_id: The comment id, a decimal string.
+        """
+        path = f"/v1/shares/{_token(token)}/comments/{check_comment_id(comment_id)}"
+        return _capability("DELETE", path)
+
+    @staticmethod
+    def share_reactions(token: str) -> Request:
+        """Build ``GET /v1/shares/{token}/reactions``. The bearer fills ``mine``.
+
+        Args:
+            token: The plaintext share token.
+        """
+        return _capability("GET", f"/v1/shares/{_token(token)}/reactions")
 
     @staticmethod
     def put_file_owner_wraps(wraps: list[dict[str, str]]) -> Request:
