@@ -4,16 +4,20 @@ Python SDK and CLI for Hippius Drive (HCFS), an end-to-end encrypted file store.
 Files are encrypted and signed on your machine; the server only ever holds
 ciphertext and cannot read your data.
 
-Pure Python — no Rust toolchain, no compiled extension, and the crypto is
-readable in this repository rather than shipped as a binary. (The optional
-`login` extra adds native signing wheels; the core install never imports them.)
-
-It is not published on PyPI. Install from this repository:
+The package itself is pure Python, and its crypto is readable in the
+[source repository](https://github.com/thenervelab/hippius-drive-sdk) rather
+than shipped as a binary. Its dependencies (`cryptography`, `pynacl`, `blake3`,
+`argon2-cffi`) ship binary wheels for common platforms, so no Rust or C
+toolchain is needed. The optional `login` extra adds native signing wheels; the
+core install never imports them.
 
 ```bash
-pip install "git+https://github.com/thenervelab/hippius-drive-sdk"
-pip install "hippius-drive[login] @ git+https://github.com/thenervelab/hippius-drive-sdk"   # plus access-key sign-in
+pip install hippius-drive
+pip install "hippius-drive[login]"   # plus access-key sign-in
 ```
+
+Unreleased changes on `main` install from the source repository:
+`pip install "git+https://github.com/thenervelab/hippius-drive-sdk"`.
 
 Python 3.10 to 3.13.
 
@@ -42,11 +46,11 @@ put the same bytes on the wire; the clients still differ in region selection
 (`Client` probes, `AsyncClient` defaults to EU unless you pass `server_url`)
 and in how a float timeout applies to request-body writes.
 
-See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough, and
-[docs/cli.md](docs/cli.md) for the `hippius-drive` command line.
+See [docs/quickstart.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/docs/quickstart.md) for the full walkthrough, and
+[docs/cli.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/docs/cli.md) for the `hippius-drive` command line.
 
-**Agents:** read [AGENTS.md](AGENTS.md). It is the instruction set for using
-this SDK and for changing this repository. Point an agent at that file.
+**Agents:** read [AGENTS.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/AGENTS.md). It is the instruction set for using
+this SDK and for changing its source. Point an agent at that file.
 
 ## Where the account address comes from
 
@@ -84,7 +88,7 @@ interoperability needs the second.
 
 The server stores ciphertext and never receives your recovery phrase or
 encryption key. What that does and does not protect is written out in
-[docs/security.md](docs/security.md), including the metadata the server does
+[docs/security.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/docs/security.md), including the metadata the server does
 see — file sizes, timestamps, and (when you send them) plaintext paths.
 
 **Your recovery phrase is the only thing that can decrypt your files.** Nobody
@@ -99,7 +103,7 @@ are replayed when that file is committed; until the hcfs exporter lands, the
 interim oracle is the hex and strings pinned in the unit tests (see
 `tests/vectors/README.md`).
 
-This repository's live suite (`pytest -m e2e`) runs in CI when
+The live suite (`pytest -m e2e`) runs in CI when
 `HIPPIUS_TEST_*` secrets are present. It covers registration, upload
 (single-shot and chunked session), download, listing, browse, search,
 optimistic-concurrency conflicts, rename, delete, and a file-share round trip

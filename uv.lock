@@ -841,18 +841,18 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "argon2-cffi", specifier = "==25.1.0" },
-    { name = "blake3", specifier = "==1.0.9" },
-    { name = "click", specifier = "==8.5.0" },
-    { name = "coincurve", marker = "extra == 'login'", specifier = "==21.0.0" },
-    { name = "cryptography", specifier = "==50.0.1" },
-    { name = "httpx", specifier = "==0.28.1" },
-    { name = "mnemonic", specifier = "==0.21" },
-    { name = "py-sr25519-bindings", marker = "extra == 'login'", specifier = "==0.2.4" },
-    { name = "pycryptodome", marker = "extra == 'login'", specifier = "==4.1.0" },
-    { name = "pydantic", specifier = "==2.13.5" },
-    { name = "pynacl", specifier = "==1.6.2" },
-    { name = "tomli", marker = "python_full_version < '3.11'", specifier = "==2.4.1" },
+    { name = "argon2-cffi", specifier = ">=25.1.0" },
+    { name = "blake3", specifier = ">=1.0.9" },
+    { name = "click", specifier = ">=8.5.0" },
+    { name = "coincurve", marker = "extra == 'login'", specifier = ">=21.0.0" },
+    { name = "cryptography", specifier = ">=50.0.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "mnemonic", specifier = ">=0.21" },
+    { name = "py-sr25519-bindings", marker = "extra == 'login'", specifier = ">=0.2.4" },
+    { name = "pycryptodome", marker = "extra == 'login'", specifier = ">=4.1.0" },
+    { name = "pydantic", specifier = ">=2.13.5" },
+    { name = "pynacl", specifier = ">=1.6.2" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.4.1" },
 ]
 provides-extras = ["login"]
 
