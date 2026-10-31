@@ -195,7 +195,9 @@ case-sensitive, but the default macOS and Windows disks are not, and Windows
 also drops trailing dots and spaces: remote files that would land on one local
 file (`A.txt` and `a.txt`, `x.` and `x`) are reported on stderr and none of
 them is written. The other files are, and the command exits 3; `mv` one of
-them remotely and rerun.
+them remotely and rerun. The check follows the operating system, not the disk:
+a case-sensitive macOS volume is refused all the same, and a case-insensitive
+disk mounted on Linux is not checked.
 
 `ls` shows directories first with recursive byte totals, then files. With no
 paging flags it lists the whole directory, fetching as many pages as that

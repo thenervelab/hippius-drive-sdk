@@ -13,7 +13,7 @@ import stat
 import sys
 import tempfile
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -950,7 +950,7 @@ def _get_tree(client: Client, target: str, dest: Path) -> None:
     if not listed:
         raise click.ClickException(f"no files under {prefix or 'the folder root'}")
     root = dest.resolve()
-    clashes = _local_clashes(list(listed))
+    clashes = _local_clashes(listed)
     for path in sorted(clashes):
         others = ", ".join(p for p in clashes[path] if p != path)
         click.echo(
@@ -971,16 +971,22 @@ def _get_tree(client: Client, target: str, dest: Path) -> None:
         raise ConflictExit(f"{len(clashes)} files were not downloaded; see the lines above")
 
 
-def _local_clashes(paths: list[str]) -> dict[str, list[str]]:
+def _local_clashes(paths: Iterable[str]) -> dict[str, list[str]]:
     """Map each remote path that shares a local file with another to all paths sharing it.
 
     Remote paths are case-sensitive, so ``A.txt`` and ``a.txt`` can both
     exist. The default macOS and Windows disks fold case, and Windows also
     drops trailing dots and spaces (``x.`` is ``x``), so writing both would
     leave one file holding whichever came last. None of a clashing group is
-    written: picking one would be a silent guess. A case-sensitive macOS
-    volume gets the same refusal; ``mv`` on one of the remote files fixes
-    either.
+    written: picking one would be a silent guess. ``mv`` on one of the
+    remote files fixes it.
+
+    The platform decides, not the destination disk: probing it would mean a
+    test write. So a case-sensitive macOS volume gets a refusal it did not
+    need, and a case-folding disk mounted on Linux gets no check.
+    ``casefold`` also folds a little more than APFS or NTFS (``ß`` and
+    ``ss``); that errs toward a refusal rather than a lost file. APFS also
+    ignores Unicode normalisation, but the listing keys are NFC already.
     """
     groups: dict[str, list[str]] = {}
     for path in sorted(paths):

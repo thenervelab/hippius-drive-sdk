@@ -2137,17 +2137,29 @@ def _downloads(files: dict[str, bytes]) -> dict[str, respx.Route]:
 def test_get_recursive_refuses_names_that_differ_only_in_case(
     env: dict[str, str], tmp_path: Path
 ) -> None:
-    _state_with([_row("docs/A.txt"), _row("docs/a.txt"), _row("docs/b.txt")])
-    routes = _downloads({"docs/A.txt": b"upper", "docs/a.txt": b"lower", "docs/b.txt": b"bravo"})
+    files = {
+        "docs/A.txt": b"upper",
+        "docs/a.txt": b"lower",
+        "docs/Sub/c.txt": b"one",
+        "docs/sub/c.txt": b"two",
+        "docs/sub/d.txt": b"delta",
+        "docs/b.txt": b"bravo",
+    }
+    _state_with([_row(path) for path in files])
+    routes = _downloads(files)
     dest = tmp_path / "out"
     result = run(["get", "-r", "docs", str(dest)], env)
     assert result.exit_code == 3, result.output
     assert "docs/A.txt is one local file with docs/a.txt" in result.stderr
     assert "docs/a.txt is one local file with docs/A.txt" in result.stderr
-    assert routes["docs/A.txt"].calls == []
-    assert routes["docs/a.txt"].calls == []
-    assert [p.name for p in dest.iterdir()] == ["b.txt"]
-    assert "downloaded 1, refused 2" in result.output
+    assert "docs/sub/c.txt is one local file with docs/Sub/c.txt" in result.stderr
+    refused = ["docs/A.txt", "docs/a.txt", "docs/Sub/c.txt", "docs/sub/c.txt"]
+    assert all(routes[path].calls == [] for path in refused)
+    # A directory that differs only in case is one local directory: only
+    # files that clash inside it are refused.
+    assert (dest / "sub" / "d.txt").read_bytes() == b"delta"
+    assert (dest / "b.txt").read_bytes() == b"bravo"
+    assert "downloaded 2, refused 4" in result.output
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="only Windows drops trailing dots and spaces")
@@ -2160,6 +2172,8 @@ def test_get_recursive_refuses_names_windows_strips_to_one(
     result = run(["get", "-r", "", str(tmp_path / "out")], env)
     assert result.exit_code == 3, result.output
     assert all(route.calls == [] for route in routes.values())
+    assert "x. is one local file with x;" in result.stderr
+    assert "dir /y is one local file with dir/y;" in result.stderr
     assert "refused 4" in result.output
 
 
