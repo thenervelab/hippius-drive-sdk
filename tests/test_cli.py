@@ -19,6 +19,7 @@ from hippius_drive.cli import main
 from hippius_drive.client import Client
 from hippius_drive.crypto import (
     file_cipher,
+    folder_link,
     grant,
     hashes,
     invite_link,
@@ -930,9 +931,11 @@ def test_share_ls_omits_the_owner_wrap_and_rm_revokes(env: dict[str, str]) -> No
 
 
 @respx.mock
-def test_folder_share_put_prints_the_drive_file_key(env: dict[str, str]) -> None:
+def test_folder_share_put_prints_a_link_secret_url(env: dict[str, str]) -> None:
     respx.post(f"{BASE}/v1/folder-shares").mock(
-        return_value=httpx.Response(201, json={"share_token": "fold", "expires_at": "later"})
+        return_value=httpx.Response(
+            201, json={"share_token": "fold", "expires_at": "later", "link_envelope": True}
+        )
     )
     result = run(
         [
@@ -949,11 +952,17 @@ def test_folder_share_put_prints_the_drive_file_key(env: dict[str, str]) -> None
     )
     assert result.exit_code == 0, result.output
     url = result.output.strip()
-    assert url.startswith("https://console.example/share/folder/fold#k=")
+    assert url.startswith("https://console.example/share/folder/fold#s=")
     parsed = sharing.parse_share_url(url)
     assert parsed.folder
-    assert parsed.secret.material == key()
+    assert parsed.secret.link_secret
+    assert parsed.secret.material != key()
     body = json.loads(respx.calls.last.request.content)
+    envelope = base64.b64decode(body["link_envelope"])
+    assert folder_link.open_envelope(parsed.secret.material, envelope) == key()
+    assert base64.b64decode(body["link_fetch_digest"]) == folder_link.fetch_digest(
+        parsed.secret.material
+    )
     assert body["path_prefix"] == "work"
     assert body["display_name"] == "Work"
     assert body["ttl"] == "24h"
