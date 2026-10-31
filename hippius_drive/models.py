@@ -442,11 +442,14 @@ class BatchDeleteError(_Wire):
 
     Attributes:
         file_id: The id that failed.
-        error: Why it failed.
+        code: Machine-readable reason, e.g. ``conflict`` when the file moved
+            past the revision ``expected_revisions`` named.
+        message: Human-readable reason.
     """
 
     file_id: str = ""
-    error: str = ""
+    code: str = ""
+    message: str = ""
 
 
 class BatchDeleteResult(_Wire):

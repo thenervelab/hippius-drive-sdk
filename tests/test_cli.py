@@ -756,7 +756,7 @@ def test_rm_reports_per_id_failures_on_stderr(env: dict[str, str]) -> None:
             json={
                 "Success": {
                     "deleted": [{"file_id": "aa", "status": "deleted"}],
-                    "errors": [{"file_id": "bb", "error": "database_error"}],
+                    "errors": [{"file_id": "bb", "code": "database_error", "message": "db down"}],
                     "files_deleted": 1,
                 }
             },
@@ -2054,7 +2054,12 @@ def test_sync_delete_failure_exits_1(env: dict[str, str], tmp_path: Path) -> Non
     respx.post(f"{BASE}/delete_files").mock(
         return_value=httpx.Response(
             200,
-            json={"Success": {"errors": [{"file_id": "aa", "error": "db"}], "files_deleted": 0}},
+            json={
+                "Success": {
+                    "errors": [{"file_id": "aa", "code": "db", "message": "x"}],
+                    "files_deleted": 0,
+                }
+            },
         )
     )
     (tmp_path / "src").mkdir()

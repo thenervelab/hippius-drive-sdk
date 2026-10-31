@@ -849,7 +849,7 @@ def _delete_ids(client: Client, file_ids: list[str]) -> int:
         result = client.files.delete_many(file_ids[start : start + MAX_BATCH_DELETE])
         deleted += result.files_deleted
         for failure in result.errors:
-            click.echo(f"failed    {failure.file_id}  {failure.error}", err=True)
+            click.echo(f"failed    {failure.file_id}  {failure.code}: {failure.message}", err=True)
         if result.errors:
             raise click.ClickException(f"deleted {deleted}, {len(result.errors)} failed")
     for file_id in file_ids:
@@ -934,7 +934,7 @@ def rm(obj: Context, targets: tuple[str, ...]) -> None:
             return
         result = client.files.delete_many(ids)
         for failure in result.errors:
-            click.echo(f"failed  {failure.file_id}  {failure.error}", err=True)
+            click.echo(f"failed  {failure.file_id}  {failure.code}: {failure.message}", err=True)
         if result.errors:
             raise click.ClickException(
                 f"deleted {result.files_deleted}, {len(result.errors)} failed"
