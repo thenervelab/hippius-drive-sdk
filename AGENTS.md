@@ -89,7 +89,7 @@ not in `__all__` — the CLI and the quickstart both import it.
 | Mint a file-share link | `client.shares.create(path_or_bytes, FileShareSpec(filename))` — URL fragment is a fresh key |
 | Open a file share | `client.shares.open(share_url)` — anonymous; password links need `password=` |
 | List / revoke file shares | `client.shares.list()` / `client.shares.revoke(token)` |
-| Mint a folder-share link | `client.folder_shares.create(FolderShareSpec(prefix, name))` — fragment is the drive file key |
+| Mint a folder-share link | `client.folder_shares.create(FolderShareSpec(prefix, name))` — `#s=` (or `#sp=` with a password): a link secret; the server keeps the drive key sealed under it |
 | Revoke a folder share | `client.folder_shares.revoke(token_or_hash)` — list returns `token_hash` only |
 | Invite someone to this drive | `client.drives.create_invite(InviteSpec(folder_mnemonic, role="writer"))` — a `#i=` link when the server advertises `drive_invite_link_envelopes`, else `#k=` |
 | Join a drive | `client.drives.accept(url, member_master, member_ss58=account)` — `#k=` or `#i=`, whole drive or one folder (`accepted.path_prefix`) |
@@ -244,8 +244,12 @@ formats the console and desktop client already use.
 - The phrase is the only way to decrypt an owned folder. Losing it loses the
   data, including files members uploaded into a shared drive. It cannot be
   rotated without orphaning everything already stored.
-- A folder-share `#k=` is the drive file key. A shared-drive invite gives the
-  member that same file key. It does not give them the owner's master phrase.
+- A folder-share link minted here is `#s=` / `#sp=`: a link secret, not the
+  drive key. Opening it fetches the drive file key from the server, so anyone
+  who opens it holds that key. Older `#k=` / `#p=` links carry the key itself;
+  the server no longer mints them (`link_envelope_required`). A shared-drive
+  invite gives the member the drive file key too, not the owner's master
+  phrase.
 - File **contents** are encrypted on the machine (XChaCha20-Poly1305 frames).
   Paths, names, sizes, and timestamps are visible to the server. Use opaque
   names for anything sensitive. Full model: [docs/security.md](docs/security.md).
@@ -290,7 +294,7 @@ secrets are present. Fork PRs skip e2e. The required check is the `ci` job.
 | `identity.py` | Account + per-folder keys; member role; ToS / rename signing text |
 | `models.py` | Pydantic wire types; byte fields as JSON int arrays |
 | `errors.py` | `DriveError` tree, including `Gone` |
-| `crypto/` | Hashes, KDF, framed cipher, mnemonic-at-rest, share links, owner wrap, grants |
+| `crypto/` | Hashes, KDF, framed cipher, mnemonic-at-rest, share links, folder-link envelopes, owner wrap, grants |
 | `_links.py` | Share and invite specs, URL finish, grant open. Re-exported specs are public |
 | `_namespaces.py` | Sync and async namespace objects. Not subclasses of each other |
 | `_ops.py` | One `Op` (request + parser) per endpoint |

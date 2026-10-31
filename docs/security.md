@@ -139,10 +139,15 @@ unwraps a `#p=` fragment, is what opens it. Anyone who receives the URL can
 read the file until the share is revoked or it expires. Revocation stops new
 downloads; it does not reach a copy someone already saved.
 
-A folder-share `#k=` fragment is the drive's file key, the same key that
-decrypts every file in that folder. The token limits which paths the server
-will serve. Anyone with the link can decrypt those files. A password wrap
-(`#p=`) keeps the raw key out of the URL; the password is then the secret.
+A folder-share link carries a random link secret (`#s=`, or `#sp=` wrapped
+under a password), not the drive key. At mint time the SDK seals the drive's
+file key under a key derived from that secret and the server stores the
+result. Opening the link proves the secret to the server and gets the sealed
+key back, so whoever opens it holds the drive's file key, the key to every
+file in the drive; the token only limits which paths the server will serve.
+Revoking the link deletes the sealed key, so a link nobody opened before it was
+revoked yields nothing. Older `#k=` / `#p=` folder links carry the key itself
+and keep working; the server no longer mints them.
 
 Treat both URLs as secrets. Do not put them in logs, tickets, or shell history
 you share.

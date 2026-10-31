@@ -38,6 +38,8 @@ MASTER = " ".join(["abandon"] * 23 + ["art"])
 SS58 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 FOLDER = "37a8eec1ce19687d"
 TOKEN = "inviteTok"
+# What the server answers a folder-share mint that stored its envelope.
+FOLD_MINTED = {"share_token": "fold", "expires_at": None, "link_envelope": True}
 
 
 def _owner() -> Client:
@@ -66,7 +68,7 @@ def test_rejected_share_inputs() -> None:
     assert _links.wire_ttl(ShareTtl.NEVER) == "never"
     identity = Identity.from_master(MASTER, "default", account_ss58=SS58)
     with pytest.raises(ValueError, match="display_name"):
-        _links.folder_share_body(identity, FolderShareSpec("work", ""))
+        _links.prepare_folder_share(identity, FolderShareSpec("work", ""))
     with pytest.raises(ValueError, match="role"):
         _links.invite_body(identity, InviteSpec(_phrase(), role="guest"))
     spec = InviteSpec(_phrase(), expires_in_secs=60, max_uses=2)
@@ -96,7 +98,7 @@ def test_rejected_share_inputs() -> None:
     assert created.invite_id == "0" * 64
     file_url = sharing.file_share_url("https://x.io", "tok", bytes(32))
     with pytest.raises(ValueError, match="folder"):
-        _links.share_key_from_url(file_url, None, folder=True)
+        _links.folder_link_from_url(file_url, None)
     with pytest.raises(DecryptError):
         _links.decode_share_filename("%%%", "%%%", bytes(32))
     with pytest.raises(ValueError, match="bytes"):
@@ -152,9 +154,7 @@ def _mount_management() -> None:
     respx.put(f"{BASE}/v1/shares/owner-wraps").mock(
         return_value=httpx.Response(200, json={"applied": 1})
     )
-    respx.post(f"{BASE}/v1/folder-shares").mock(
-        return_value=httpx.Response(201, json={"share_token": "fold", "expires_at": None})
-    )
+    respx.post(f"{BASE}/v1/folder-shares").mock(return_value=httpx.Response(201, json=FOLD_MINTED))
     respx.get(f"{BASE}/v1/folder-shares").mock(return_value=httpx.Response(200, json=[]))
     respx.delete(f"{BASE}/v1/folder-shares/fold").mock(return_value=httpx.Response(204))
     respx.patch(f"{BASE}/v1/folder-shares/fold").mock(
@@ -215,12 +215,13 @@ def _exercise(client: Client) -> None:
     applied = client.shares.put_owner_wraps(MASTER, [("tok", secret)])
     assert applied.applied == 1
     folder = client.folder_shares.create(FolderShareSpec("work", "Work", ttl=ShareTtl.DAYS_7))
+    link = ShareSecret(bytes(32), link_secret=True)
     assert folder.share_token == "fold"
     assert client.folder_shares.list() == []
     client.folder_shares.revoke("fold")
     assert client.folder_shares.update_ttl("ab" * 32, "never") == "later"
     client.folder_shares.revoke("ab" * 32)
-    client.folder_shares.put_owner_wraps(MASTER, [("foldtok", secret)])
+    client.folder_shares.put_owner_wraps(MASTER, [("foldtok", link)])
     key = client.identity.encryption_key
     url = sharing.folder_share_url("https://console.hippius.com", "fold", key)
     blob = file_cipher.encrypt_bytes(b"doc", key)
@@ -263,12 +264,13 @@ async def test_async_owner_management_routes() -> None:
     applied = await client.shares.put_owner_wraps(MASTER, [("tok", secret)])
     assert applied.applied == 1
     folder = await client.folder_shares.create(FolderShareSpec("work", "Work"))
+    link = ShareSecret(bytes(32), link_secret=True)
     assert folder.share_token == "fold"
     assert await client.folder_shares.list() == []
     await client.folder_shares.revoke("fold")
     assert await client.folder_shares.update_ttl("ab" * 32, "never") == "later"
     await client.folder_shares.revoke("ab" * 32)
-    await client.folder_shares.put_owner_wraps(MASTER, [("foldtok", secret)])
+    await client.folder_shares.put_owner_wraps(MASTER, [("foldtok", link)])
     key = client.identity.encryption_key
     url = sharing.folder_share_url("https://console.hippius.com", "fold", key)
     blob = file_cipher.encrypt_bytes(b"doc", key)
@@ -337,9 +339,7 @@ async def test_async_member_can_mint_and_update_by_token() -> None:
     respx.get(f"{BASE}/v1/capabilities").mock(
         return_value=httpx.Response(200, json={"member_folder_shares": True})
     )
-    respx.post(f"{BASE}/v1/folder-shares").mock(
-        return_value=httpx.Response(201, json={"share_token": "fold", "expires_at": None})
-    )
+    respx.post(f"{BASE}/v1/folder-shares").mock(return_value=httpx.Response(201, json=FOLD_MINTED))
     respx.patch(f"{BASE}/v1/folder-shares/fold").mock(
         return_value=httpx.Response(200, json={"expires_at": "soon"})
     )
@@ -471,9 +471,7 @@ def test_download_errors_and_a_path_source(tmp_path) -> None:
     respx.patch(f"{BASE}/v1/folder-shares/fold").mock(
         return_value=httpx.Response(200, json={"expires_at": "soon"})
     )
-    respx.post(f"{BASE}/v1/folder-shares").mock(
-        return_value=httpx.Response(201, json={"share_token": "fold", "expires_at": None})
-    )
+    respx.post(f"{BASE}/v1/folder-shares").mock(return_value=httpx.Response(201, json=FOLD_MINTED))
     client.folder_shares.create(FolderShareSpec("", "All"))
     assert client.folder_shares.update_ttl("fold", "24h") == "soon"
     key = bytes(32)
