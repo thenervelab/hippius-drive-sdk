@@ -36,6 +36,7 @@ from hippius_drive.models import (
     OpenedShare,
     OwnerWrapsResult,
     PostedComment,
+    ReactionMoment,
     ShareComment,
     ShareInsights,
     ShareReactions,
@@ -392,6 +393,126 @@ class ShareOps:
         """
         _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
         return self._client.run(_ops.share_reactions(token))
+
+    def react(self, token: str, emoji: str) -> None:
+        """Add this account's reaction. Adding it again changes nothing.
+
+        The owner turning reactions off is ``Forbidden`` ``reactions-off``;
+        an author the owner blocked gets ``Forbidden`` ``blocked``.
+
+        Args:
+            token: The plaintext share token.
+            emoji: One of :data:`hippius_drive.REACTIONS`.
+
+        Raises:
+            ValueError: For another emoji, or a server with ``share_comments`` off.
+        """
+        emoji = _share_insights.check_reaction(emoji)
+        _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
+        self._client.run(_ops.put_share_reaction(token, emoji))
+
+    def unreact(self, token: str, emoji: str) -> None:
+        """Take this account's reaction back, with every moment sent with it.
+
+        Works with reactions off and for a blocked author.
+
+        Args:
+            token: The plaintext share token.
+            emoji: One of :data:`hippius_drive.REACTIONS`.
+
+        Raises:
+            ValueError: For another emoji, or a server with ``share_comments`` off.
+        """
+        emoji = _share_insights.check_reaction(emoji)
+        _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
+        self._client.run(_ops.delete_share_reaction(token, emoji))
+
+    def react_at(self, token: str, emoji: str, at_ms: int) -> None:
+        """Send this account's reaction at a moment of the video.
+
+        Each call stores one more moment, so it is never retried. It also
+        adds the reaction, as :meth:`react` does. :meth:`unreact` takes the
+        reaction and all its moments back; one moment cannot be removed.
+        Past 200 moments on the link, or 5,000 in all, it is ``Conflict``
+        ``moment-limit``.
+
+        Args:
+            token: The plaintext share token.
+            emoji: One of :data:`hippius_drive.REACTIONS`.
+            at_ms: The moment, from 0 to seven days in milliseconds.
+
+        Raises:
+            ValueError: For bad input, or a server with ``share_reaction_moments`` off.
+        """
+        emoji = _share_insights.check_reaction(emoji)
+        _share_insights.check_moment(at_ms)
+        _share_insights.require_moments(_links.capabilities_or_disabled(self._client.run))
+        self._client.run(_ops.post_reaction_moment(token, emoji, at_ms))
+
+    def reaction_moments(self, token: str) -> Sequence[ReactionMoment]:
+        """Read every reaction moment of a file share, by moment. Anonymous.
+
+        Args:
+            token: The plaintext share token.
+
+        Raises:
+            ValueError: If the server has ``share_reaction_moments`` off.
+        """
+        _share_insights.require_moments(_links.capabilities_or_disabled(self._client.run))
+        return self._client.run(_ops.share_reaction_moments(token)).moments
+
+    def block_author(self, token: str, comment_id: str) -> None:
+        """Stop the author of a comment on this account's link from commenting and reacting.
+
+        The server never says who the author is. What they wrote stays until
+        it is deleted. The block lasts after the comment is deleted, and can
+        only be lifted through a comment of theirs still on the link.
+
+        Args:
+            token: The plaintext share token.
+            comment_id: A comment by that author.
+
+        Raises:
+            ValueError: If the id is not a comment id, or the server has
+                ``share_comments`` off.
+        """
+        check_comment_id(comment_id)
+        _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
+        self._client.run(_ops.block_comment_author(token, comment_id))
+
+    def unblock_author(self, token: str, comment_id: str) -> None:
+        """Lift a block through any comment of that author still on the link.
+
+        It clears the ``blocked`` mark of ``comment_id`` only: a second
+        comment the same author was blocked through keeps its mark.
+
+        Args:
+            token: The plaintext share token.
+            comment_id: A comment by that author.
+
+        Raises:
+            ValueError: If the id is not a comment id, or the server has
+                ``share_comments`` off.
+        """
+        check_comment_id(comment_id)
+        _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
+        self._client.run(_ops.unblock_comment_author(token, comment_id))
+
+    def mark_insights_seen(self, token: str) -> None:
+        """Restart the link's ``new_views`` and ``new_comments`` in :meth:`list` from now.
+
+        The console sends this when the owner opens a link's Insights;
+        :meth:`insights` does not, so reading stays free of side effects.
+
+        Args:
+            token: The plaintext share token.
+
+        Raises:
+            ValueError: If the server has ``share_listing_counts`` off.
+        """
+        caps = _links.capabilities_or_disabled(self._client.run)
+        _share_insights.require_listing_counts(caps)
+        self._client.run(_ops.mark_share_insights_seen(token))
 
 
 class FolderShareOps:
@@ -860,6 +981,54 @@ class AsyncShareOps:
         caps = await _links.capabilities_or_disabled_async(self._client.run)
         _share_insights.require_comments(caps)
         return await self._client.run(_ops.share_reactions(token))
+
+    async def react(self, token: str, emoji: str) -> None:
+        """Async twin of :meth:`ShareOps.react`."""
+        emoji = _share_insights.check_reaction(emoji)
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_comments(caps)
+        await self._client.run(_ops.put_share_reaction(token, emoji))
+
+    async def unreact(self, token: str, emoji: str) -> None:
+        """Async twin of :meth:`ShareOps.unreact`."""
+        emoji = _share_insights.check_reaction(emoji)
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_comments(caps)
+        await self._client.run(_ops.delete_share_reaction(token, emoji))
+
+    async def react_at(self, token: str, emoji: str, at_ms: int) -> None:
+        """Async twin of :meth:`ShareOps.react_at`."""
+        emoji = _share_insights.check_reaction(emoji)
+        _share_insights.check_moment(at_ms)
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_moments(caps)
+        await self._client.run(_ops.post_reaction_moment(token, emoji, at_ms))
+
+    async def reaction_moments(self, token: str) -> Sequence[ReactionMoment]:
+        """Async twin of :meth:`ShareOps.reaction_moments`."""
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_moments(caps)
+        return (await self._client.run(_ops.share_reaction_moments(token))).moments
+
+    async def block_author(self, token: str, comment_id: str) -> None:
+        """Async twin of :meth:`ShareOps.block_author`."""
+        check_comment_id(comment_id)
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_comments(caps)
+        await self._client.run(_ops.block_comment_author(token, comment_id))
+
+    async def unblock_author(self, token: str, comment_id: str) -> None:
+        """Async twin of :meth:`ShareOps.unblock_author`."""
+        check_comment_id(comment_id)
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_comments(caps)
+        await self._client.run(_ops.unblock_comment_author(token, comment_id))
+
+    async def mark_insights_seen(self, token: str) -> None:
+        """Async twin of :meth:`ShareOps.mark_insights_seen`."""
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_listing_counts(caps)
+        await self._client.run(_ops.mark_share_insights_seen(token))
 
 
 class AsyncFolderShareOps:

@@ -3,6 +3,7 @@
 from hippius_drive._links import FileShareSpec as FileShareSpec
 from hippius_drive._links import FolderShareSpec as FolderShareSpec
 from hippius_drive._links import InviteSpec as InviteSpec
+from hippius_drive._share_insights import REACTIONS as REACTIONS
 from hippius_drive._version import __version__ as __version__
 from hippius_drive.auth import ApiSession as ApiSession
 from hippius_drive.auth import login as login
@@ -32,6 +33,7 @@ from hippius_drive.models import CreatedInvite as CreatedInvite
 from hippius_drive.models import CreatedShare as CreatedShare
 from hippius_drive.models import DriveMembership as DriveMembership
 from hippius_drive.models import PostedComment as PostedComment
+from hippius_drive.models import ReactionMoment as ReactionMoment
 from hippius_drive.models import RenameSpec as RenameSpec
 from hippius_drive.models import SearchFilters as SearchFilters
 from hippius_drive.models import ShareComment as ShareComment
@@ -41,6 +43,7 @@ from hippius_drive.models import ShareSettings as ShareSettings
 from hippius_drive.models import ShareTtl as ShareTtl
 
 __all__ = [
+    "REACTIONS",
     "AcceptedInvite",
     "ApiSession",
     "AsyncClient",
@@ -67,6 +70,7 @@ __all__ = [
     "PostedComment",
     "QuotaExceeded",
     "RateLimited",
+    "ReactionMoment",
     "RenameSpec",
     "SearchFilters",
     "ServerError",

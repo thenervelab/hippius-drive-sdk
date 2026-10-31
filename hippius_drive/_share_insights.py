@@ -48,6 +48,70 @@ def require_comments(caps: Capabilities) -> None:
         )
 
 
+def require_moments(caps: Capabilities) -> None:
+    """Stop before a moment route an older server answers with 404 or 405.
+
+    Raises:
+        ValueError: If ``share_reaction_moments`` is off.
+    """
+    if not caps.share_reaction_moments:
+        raise ValueError(
+            "this server has share_reaction_moments off: reactions at a moment are not available"
+        )
+
+
+def require_listing_counts(caps: Capabilities) -> None:
+    """Stop before ``PUT .../insights/seen`` on a server that answers it with a bodiless 404.
+
+    Raises:
+        ValueError: If ``share_listing_counts`` is off.
+    """
+    if not caps.share_listing_counts:
+        raise ValueError(
+            "this server has share_listing_counts off: it keeps no 'new since seen' counts"
+        )
+
+
+REACTIONS = (
+    "\U0001f44d",
+    "\u2764\ufe0f",
+    "\U0001f602",
+    "\U0001f62e",
+    "\U0001f389",
+    "\U0001f44f",
+    "\U0001f525",
+    "\U0001f64c",
+)
+"""The reactions a link takes, in the order the share page shows them (hcfs ``REACTIONS``)."""
+
+MAX_MOMENT_MS = 604_800_000
+"""Seven days: the longest a view may report, and the latest moment hcfs takes."""
+
+
+def check_reaction(emoji: str) -> str:
+    """The reaction as the server stores it. A heart without U+FE0F is the same heart.
+
+    Raises:
+        ValueError: If ``emoji`` is not one of :data:`REACTIONS`.
+    """
+    if emoji == "\u2764":
+        return REACTIONS[1]
+    if emoji not in REACTIONS:
+        raise ValueError(f"reaction must be one of {' '.join(REACTIONS)}")
+    return emoji
+
+
+def check_moment(at_ms: int) -> int:
+    """Refuse a moment the server would refuse.
+
+    Raises:
+        ValueError: If ``at_ms`` is outside 0 to seven days.
+    """
+    if not 0 <= at_ms <= MAX_MOMENT_MS:
+        raise ValueError(f"at_ms must be from 0 to {MAX_MOMENT_MS} (seven days)")
+    return at_ms
+
+
 def settings_body(
     *, insights: bool | None, comments: bool | None, reactions: bool | None
 ) -> dict[str, bool]:

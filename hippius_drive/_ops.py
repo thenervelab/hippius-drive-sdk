@@ -671,6 +671,75 @@ def share_reactions(token: str) -> Op[models.ShareReactions]:
     return Op(build.share_reactions(token), _parser(models.ShareReactions))
 
 
+def put_share_reaction(token: str, emoji: str) -> Op[None]:
+    """Add the caller's reaction.
+
+    Args:
+        token: The plaintext share token.
+        emoji: One of the link's reactions.
+    """
+    return Op(build.put_share_reaction(token, emoji), _ignored)
+
+
+def delete_share_reaction(token: str, emoji: str) -> Op[None]:
+    """Take the caller's reaction back, with every moment sent with it.
+
+    Args:
+        token: The plaintext share token.
+        emoji: One of the link's reactions.
+    """
+    return Op(build.delete_share_reaction(token, emoji), _ignored)
+
+
+def post_reaction_moment(token: str, emoji: str, at_ms: int) -> Op[None]:
+    """Send the caller's reaction at a moment of the video.
+
+    Args:
+        token: The plaintext share token.
+        emoji: One of the link's reactions.
+        at_ms: The moment, in milliseconds.
+    """
+    return Op(build.post_reaction_moment(token, emoji, at_ms), _ignored)
+
+
+def share_reaction_moments(token: str) -> Op[models.ReactionMoments]:
+    """Read every reaction moment of a file share.
+
+    Args:
+        token: The plaintext share token.
+    """
+    return Op(build.share_reaction_moments(token), _parser(models.ReactionMoments))
+
+
+def block_comment_author(token: str, comment_id: str) -> Op[None]:
+    """Block the author of a comment on the caller's link.
+
+    Args:
+        token: The plaintext share token.
+        comment_id: A comment by that author.
+    """
+    return Op(build.block_comment_author(token, comment_id), _ignored)
+
+
+def unblock_comment_author(token: str, comment_id: str) -> Op[None]:
+    """Lift a block through the comment it was made through.
+
+    Args:
+        token: The plaintext share token.
+        comment_id: A comment by that author.
+    """
+    return Op(build.unblock_comment_author(token, comment_id), _ignored)
+
+
+def mark_share_insights_seen(token: str) -> Op[None]:
+    """Restart a link's "new" counts from now.
+
+    Args:
+        token: The plaintext share token.
+    """
+    return Op(build.mark_share_insights_seen(token), _ignored)
+
+
 def put_file_owner_wraps(wraps: list[dict[str, str]]) -> Op[models.OwnerWrapsResult]:
     """Store mnemonic-sealed file-share secrets.
 
