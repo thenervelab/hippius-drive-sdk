@@ -94,6 +94,10 @@ not in `__all__` — the CLI and the quickstart both import it.
 | Read a file share's comments | `client.shares.comments(share_url)` — decrypted; `text=None` when one will not open; trust `owner`, not `name` (`name_claimed`) |
 | Comment / delete a comment | `client.shares.post_comment(share_url, text)` (anonymous) / `client.shares.delete_comment(token, id)` |
 | Reaction counts | `client.shares.reactions(token)` |
+| React / take it back | `client.shares.react(token, emoji)` / `unreact(token, emoji)` — `emoji` in `hippius_drive.REACTIONS`; `react_at(token, emoji, at_ms)` sends it at a video moment (never retried) |
+| Reaction moments | `client.shares.reaction_moments(token)` — needs `share_reaction_moments` |
+| Block a commenter on your link | `client.shares.block_author(token, comment_id)` / `unblock_author(token, comment_id)` — unblock through a comment of theirs still on the link |
+| Clear your link's "new" counts | `client.shares.mark_insights_seen(token)` — `insights()` does not; needs `share_listing_counts` |
 | Rebuild your share's URL | `client.shares.recover_url(token, master_phrase)` — needs the owner wrap the console stores |
 | Mint a folder-share link | `client.folder_shares.create(FolderShareSpec(prefix, name))` — `#s=` (or `#sp=` with a password): a link secret; the server keeps the drive key sealed under it |
 | Revoke a folder share | `client.folder_shares.revoke(token_or_hash)` — list returns `token_hash` only |
@@ -221,6 +225,10 @@ hippius-drive share insights TOKEN
 hippius-drive share comments --url-file F         # or HIPPIUS_SHARE_URL; TOKEN alone for your own console link
 hippius-drive share comment-post "text" --url-file F   # TEXT - reads stdin; #p= password only via HIPPIUS_SHARE_PASSWORD
 hippius-drive share reactions TOKEN
+hippius-drive share react 🔥 TOKEN [--at-ms 98000]   # unreact EMOJI TOKEN takes it back
+hippius-drive share moments TOKEN
+hippius-drive share block TOKEN COMMENT_ID          # unblock TOKEN COMMENT_ID
+hippius-drive share seen TOKEN                      # new views/comments start again from 0
 hippius-drive folder-share put --prefix work --name Work
 hippius-drive invite put --role writer --days 7
 hippius-drive drives join --invite-file F   # or HIPPIUS_INVITE_URL; never the URL in argv

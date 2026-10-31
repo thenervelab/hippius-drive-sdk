@@ -707,6 +707,10 @@ class Capabilities(_Wire):
         share_comments: File-share comment and reaction routes are mounted.
         share_comment_replies: A comment may name a ``parent_id``. Without it
             the server ignores the field and stores a top-level comment.
+        share_reaction_moments: Reactions at a moment of a video can be sent
+            and listed.
+        share_listing_counts: Share listings carry ``counts``, and the owner
+            can mark a link's insights seen.
     """
 
     shares: bool = False
@@ -718,6 +722,8 @@ class Capabilities(_Wire):
     share_insights: bool = False
     share_comments: bool = False
     share_comment_replies: bool = False
+    share_reaction_moments: bool = False
+    share_listing_counts: bool = False
 
 
 class ExpiryResult(_Wire):
@@ -893,6 +899,28 @@ class ShareReactions(_Wire):
 
     counts: dict[str, int] = {}
     mine: list[str] = []
+
+
+class ReactionMoment(_Wire):
+    """A reaction someone sent at a moment of a video. It names no author and no time.
+
+    Attributes:
+        emoji: One of the link's reactions.
+        at_ms: The moment of the video, in milliseconds.
+    """
+
+    emoji: str
+    at_ms: int
+
+
+class ReactionMoments(_Wire):
+    """``GET /v1/shares/{token}/reactions/moments``: every moment, by ``at_ms``.
+
+    Attributes:
+        moments: At most 5,000, the most a link holds; not paged.
+    """
+
+    moments: list[ReactionMoment] = []
 
 
 @dataclass(frozen=True)

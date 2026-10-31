@@ -904,6 +904,87 @@ class RequestBuilders:
         return _capability("GET", f"/v1/shares/{_token(token)}/reactions")
 
     @staticmethod
+    def put_share_reaction(token: str, emoji: str) -> Request:
+        """Build ``PUT /v1/shares/{token}/reactions/{emoji}``. Idempotent, no body.
+
+        Args:
+            token: The plaintext share token.
+            emoji: One of the server's reactions; percent-encoded here.
+        """
+        return _capability("PUT", f"/v1/shares/{_token(token)}/reactions/{_segment(emoji)}")
+
+    @staticmethod
+    def delete_share_reaction(token: str, emoji: str) -> Request:
+        """Build ``DELETE /v1/shares/{token}/reactions/{emoji}``. Also drops its moments.
+
+        Args:
+            token: The plaintext share token.
+            emoji: One of the server's reactions; percent-encoded here.
+        """
+        return _capability("DELETE", f"/v1/shares/{_token(token)}/reactions/{_segment(emoji)}")
+
+    @staticmethod
+    def post_reaction_moment(token: str, emoji: str, at_ms: int) -> Request:
+        """Build ``POST /v1/shares/{token}/reactions/{emoji}/moments``.
+
+        Never replayed: every call stores one more moment, so a retry after
+        a lost response would store it twice.
+
+        Args:
+            token: The plaintext share token.
+            emoji: One of the server's reactions; percent-encoded here.
+            at_ms: The moment of the video, in milliseconds.
+        """
+        return Request(
+            "POST",
+            f"/v1/shares/{_token(token)}/reactions/{_segment(emoji)}/moments",
+            json={"at_ms": at_ms},
+            replayable=False,
+            redact_url=True,
+        )
+
+    @staticmethod
+    def share_reaction_moments(token: str) -> Request:
+        """Build ``GET /v1/shares/{token}/reactions/moments``. Anonymous.
+
+        Args:
+            token: The plaintext share token.
+        """
+        path = f"/v1/shares/{_token(token)}/reactions/moments"
+        return _capability("GET", path, anonymous=True)
+
+    @staticmethod
+    def block_comment_author(token: str, comment_id: str) -> Request:
+        """Build ``POST /v1/shares/{token}/comments/{id}/block``. Idempotent.
+
+        Args:
+            token: The plaintext share token.
+            comment_id: A comment by the author to block.
+        """
+        path = f"/v1/shares/{_token(token)}/comments/{check_comment_id(comment_id)}/block"
+        return _capability("POST", path)
+
+    @staticmethod
+    def unblock_comment_author(token: str, comment_id: str) -> Request:
+        """Build ``DELETE /v1/shares/{token}/comments/{id}/block``. Idempotent.
+
+        Args:
+            token: The plaintext share token.
+            comment_id: The comment the author was blocked through.
+        """
+        path = f"/v1/shares/{_token(token)}/comments/{check_comment_id(comment_id)}/block"
+        return _capability("DELETE", path)
+
+    @staticmethod
+    def mark_share_insights_seen(token: str) -> Request:
+        """Build ``PUT /v1/shares/{token}/insights/seen``. No body; idempotent.
+
+        Args:
+            token: The plaintext share token.
+        """
+        return _capability("PUT", f"/v1/shares/{_token(token)}/insights/seen")
+
+    @staticmethod
     def put_file_owner_wraps(wraps: list[dict[str, str]]) -> Request:
         """Build ``PUT /v1/shares/owner-wraps``.
 
