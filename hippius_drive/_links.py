@@ -18,7 +18,15 @@ import blake3
 from hippius_drive import _ops, errors
 from hippius_drive._ops import Op
 from hippius_drive._upload import SPOOL_MAX, TRANSPORT_CHUNK, PlaintextSource
-from hippius_drive.crypto import file_cipher, grant, hashes, invite_link, owner_wrap, sharing
+from hippius_drive.crypto import (
+    file_cipher,
+    folder_link,
+    grant,
+    hashes,
+    invite_link,
+    owner_wrap,
+    sharing,
+)
 from hippius_drive.crypto.invite_link import FragmentForm, InviteFragment, InviteLinkKind
 from hippius_drive.crypto.sharing import ShareSecret
 from hippius_drive.errors import DecryptError, NotFound
@@ -32,6 +40,7 @@ from hippius_drive.models import (
     DriveMembership,
     DriveMembershipsWire,
     DriveMembershipWire,
+    FolderLinkKey,
     InviteLinkKey,
     InviteMeta,
     InviteMint,
@@ -76,7 +85,7 @@ class FolderShareSpec:
         path_prefix: Drive-relative directory. "" shares the whole drive.
         display_name: Name shown on the recipient page.
         ttl: How long the link stays reachable.
-        password: When set, the URL is a ``#p=`` link.
+        password: When set, the URL is a ``#sp=`` link instead of ``#s=``.
         console_base_url: Origin the recipient URL is built against.
     """
 
@@ -210,18 +219,27 @@ def chunk_count(ciphertext_size: int) -> int:
     return max(1, math.ceil(ciphertext_size / TRANSPORT_CHUNK))
 
 
-def folder_share_body(identity: Identity, spec: FolderShareSpec) -> dict[str, Any]:
-    """The folder-share mint body. A member names the drive owner.
+def prepare_folder_share(
+    identity: Identity, spec: FolderShareSpec
+) -> tuple[dict[str, Any], ShareSecret]:
+    """The folder-share mint body and the fragment secret of its link. No network.
+
+    The link carries a fresh link secret (``#s=``, or ``#sp=`` under a
+    password), never the drive key. The body carries the drive key sealed
+    under that secret and the digest the server checks a recipient's proof
+    against. The server refuses a drive link without them
+    (``link_envelope_required``). A member names the drive owner.
 
     Args:
         identity: The drive the share reads.
-        spec: Prefix, name, and ttl.
+        spec: Prefix, name, ttl, and optional password.
 
     Returns:
-        The JSON body. It contains no key.
+        The JSON body, which holds no key in the clear, and the secret.
 
     Raises:
-        ValueError: If the caller is a reader, or the prefix or name is unusable.
+        ValueError: If the caller is a reader, or the prefix, name, or
+            password is unusable.
     """
     identity.require_writer()
     if not spec.display_name:
@@ -237,18 +255,33 @@ def folder_share_body(identity: Identity, spec: FolderShareSpec) -> dict[str, An
     }
     if identity.role != OWNER:
         body["owner_ss58"] = identity.account_ss58
-    return body
+    link_secret = folder_link.generate_link_secret()
+    envelope = folder_link.seal_envelope(link_secret, identity.encryption_key)
+    body["link_envelope"] = base64.b64encode(envelope).decode()
+    body["link_fetch_digest"] = base64.b64encode(folder_link.fetch_digest(link_secret)).decode()
+    if spec.password is None:
+        return body, ShareSecret(link_secret, link_secret=True)
+    wrapped = sharing.wrap_share_key(spec.password, link_secret)
+    return body, ShareSecret(wrapped, private=True, link_secret=True)
 
 
-def folder_share_secret(identity: Identity, spec: FolderShareSpec) -> ShareSecret:
-    """The fragment secret for a folder share: the drive file key, possibly wrapped."""
-    return _fragment(identity.encryption_key, spec.password)
+def envelope_not_stored() -> errors.InvalidResponse:
+    """The error for a mint the server answered without storing the envelope.
+
+    A server from before link-secret folder links ignores the two body
+    fields and answers 201 without ``link_envelope``. Its link would never
+    open, so the caller revokes it and raises this instead of returning a URL.
+    """
+    return errors.InvalidResponse(
+        "the server did not store the folder link envelope, so the link would never open; "
+        "it was revoked. The server predates link-secret folder links"
+    )
 
 
 def finish_folder_share(
     minted: MintedShare, secret: ShareSecret, spec: FolderShareSpec
 ) -> CreatedShare:
-    """Build a folder-share URL. A private secret only produces ``#p=``."""
+    """Build a folder-share URL: ``#s=``, or ``#sp=`` for a password link."""
     url = sharing.share_url(spec.console_base_url, minted.share_token, secret, folder=True)
     return CreatedShare(minted.share_token, url, minted.expires_at)
 
@@ -511,22 +544,75 @@ def open_memberships(
     return opened
 
 
-def share_key_from_url(url: str, password: str | None, *, folder: bool) -> tuple[str, bytes]:
-    """Return ``(token, raw key)`` from a recipient URL.
+def share_key_from_url(url: str, password: str | None) -> tuple[str, bytes]:
+    """Return ``(token, raw key)`` from a file-share URL.
 
     Raises:
-        ValueError: If the URL is the wrong kind, or a password link has no password.
+        ValueError: If the URL is not a file share, or a password link has no password.
         DecryptError: If the password does not open the link.
     """
+    token, key, _link_secret = _open_url(url, password, folder=False)
+    return token, key
+
+
+@dataclass(frozen=True)
+class FolderLinkUrl:
+    """A folder-share URL with any password wrap already removed.
+
+    Attributes:
+        token: The plaintext folder-share token.
+        material: The drive file key (``#k=`` / ``#p=``), or the link secret
+            (``#s=`` / ``#sp=``), which only opens the server's envelope.
+        link_secret: True when ``material`` is a link secret.
+    """
+
+    token: str
+    material: bytes = field(repr=False)
+    link_secret: bool
+
+
+def folder_link_from_url(url: str, password: str | None) -> FolderLinkUrl:
+    """Parse a folder-share URL in any of its four forms.
+
+    Raises:
+        ValueError: If the URL is not a folder share, or a password link has no password.
+        DecryptError: If the password does not open the link.
+    """
+    token, material, link_secret = _open_url(url, password, folder=True)
+    return FolderLinkUrl(token, material, link_secret)
+
+
+def folder_link_proof(link: FolderLinkUrl) -> str:
+    """The ``x-hcfs-link-proof`` header for a ``#s=`` / ``#sp=`` link."""
+    return folder_link.fetch_proof(link.material)
+
+
+def open_folder_link_key(link: FolderLinkUrl, found: FolderLinkKey) -> bytes:
+    """Open the envelope ``link-key`` returned, yielding the drive file key.
+
+    Raises:
+        InvalidResponse: If the envelope is not standard base64.
+        DecryptError: If the envelope has the wrong shape or does not open.
+    """
+    try:
+        envelope = base64.b64decode(found.envelope, validate=True)
+    except ValueError as exc:
+        raise errors.InvalidResponse("folder link envelope is not standard base64") from exc
+    return folder_link.open_envelope(link.material, envelope)
+
+
+def _open_url(url: str, password: str | None, *, folder: bool) -> tuple[str, bytes, bool]:
     parsed = sharing.parse_share_url(url)
     if parsed.folder != folder:
         kind = "folder" if folder else "file"
         raise ValueError(f"this URL is not a {kind} share")
-    if parsed.secret.private:
-        if password is None:
-            raise ValueError("password is required to open this share")
-        return parsed.token, sharing.unwrap_share_key(password, parsed.secret.material)
-    return parsed.token, parsed.secret.material
+    secret = parsed.secret
+    if not secret.private:
+        return parsed.token, secret.material, secret.link_secret
+    if password is None:
+        raise ValueError("password is required to open this share")
+    material = sharing.unwrap_share_key(password, secret.material)
+    return parsed.token, material, secret.link_secret
 
 
 def decode_share_filename(filename_ct: str, filename_nonce: str, key: bytes) -> str:
