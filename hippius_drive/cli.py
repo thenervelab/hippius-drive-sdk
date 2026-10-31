@@ -943,6 +943,85 @@ def share_reactions(obj: Context, token: str, as_json: bool) -> None:
     _emit(rows, as_json, _reaction_line)
 
 
+@share.command("react")
+@click.argument("emoji")
+@click.argument("token")
+@click.option(
+    "--at-ms",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Send it at this moment of the video, in milliseconds. Each call adds one more.",
+)
+@click.pass_obj
+def share_react(obj: Context, emoji: str, token: str, at_ms: int | None) -> None:
+    """React to a file share with EMOJI, one of the link's eight reactions."""
+    with obj.client() as client:
+        if at_ms is None:
+            client.shares.react(token, emoji)
+        else:
+            client.shares.react_at(token, emoji, at_ms)
+    click.echo("reacted")
+
+
+@share.command("unreact")
+@click.argument("emoji")
+@click.argument("token")
+@click.pass_obj
+def share_unreact(obj: Context, emoji: str, token: str) -> None:
+    """Take your EMOJI reaction back, with every moment you sent it at."""
+    with obj.client() as client:
+        client.shares.unreact(token, emoji)
+    click.echo("removed")
+
+
+@share.command("moments")
+@click.argument("token")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.pass_obj
+def share_moments(obj: Context, token: str, as_json: bool) -> None:
+    """List every reaction sent at a moment of a file share's video."""
+    with obj.client() as client:
+        found = client.shares.reaction_moments(token)
+    rows = [item.model_dump() for item in found]
+    _emit(rows, as_json, _moment_line)
+
+
+@share.command("block")
+@click.argument("token")
+@click.argument("comment_id")
+@click.pass_obj
+def share_block(obj: Context, token: str, comment_id: str) -> None:
+    """Stop the author of COMMENT_ID commenting and reacting on your share.
+
+    Unblock through a comment of theirs still on the link: once their last
+    one is deleted, the block cannot be undone.
+    """
+    with obj.client() as client:
+        client.shares.block_author(token, comment_id)
+    click.echo("blocked")
+
+
+@share.command("unblock")
+@click.argument("token")
+@click.argument("comment_id")
+@click.pass_obj
+def share_unblock(obj: Context, token: str, comment_id: str) -> None:
+    """Lift a block through COMMENT_ID, a comment by the blocked author."""
+    with obj.client() as client:
+        client.shares.unblock_author(token, comment_id)
+    click.echo("unblocked")
+
+
+@share.command("seen")
+@click.argument("token")
+@click.pass_obj
+def share_seen(obj: Context, token: str) -> None:
+    """Mark your share's insights seen: its new views and comments start again from 0."""
+    with obj.client() as client:
+        client.shares.mark_insights_seen(token)
+    click.echo("marked seen")
+
+
 @main.group("folder-share")
 def folder_share() -> None:
     """Mint, list, and revoke folder-share links."""
@@ -1310,6 +1389,10 @@ def _moment(at_ms: int | None) -> str:
     if hours:
         return f"{hours}:{minutes:02}:{seconds:02}"
     return f"{minutes}:{seconds:02}"
+
+
+def _moment_line(row: dict[str, Any]) -> str:
+    return f"{_moment(row['at_ms']):>8}  {row['emoji']}"
 
 
 def _reaction_line(row: dict[str, Any]) -> str:
