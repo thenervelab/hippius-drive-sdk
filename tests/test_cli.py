@@ -2,6 +2,7 @@ import ast
 import base64
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,9 @@ from hippius_drive.crypto import (
 )
 from hippius_drive.identity import Identity
 from tests.helpers import manifest_from, multipart_parts
+
+if sys.platform == "win32":
+    import _winapi
 
 BASE = "https://example.test"
 MASTER = " ".join(["abandon"] * 23 + ["art"])
@@ -1893,6 +1897,30 @@ def test_put_recursive_skips_symlinks_and_names_them(env: dict[str, str], tmp_pa
     assert "link.txt" in result.stderr
     assert "linkdir" in result.stderr
     assert "uploaded 3, replaced 0" in result.output
+
+
+@respx.mock
+def test_put_recursive_skips_windows_junctions(env: dict[str, str], tmp_path: Path) -> None:
+    if sys.platform != "win32":
+        pytest.skip("directory junctions exist only on Windows")
+    _state_with([])
+    upload = respx.post(f"{BASE}/upload").mock(return_value=httpx.Response(200, json=UPLOADED))
+    _dirs_route()
+    src = _tree(tmp_path)
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "x.txt").write_bytes(b"outside")
+    # One junction loops back into the tree, one leads out of it.
+    _winapi.CreateJunction(str(src / "sub"), str(src / "loop"))
+    _winapi.CreateJunction(str(tmp_path / "elsewhere"), str(src / "out"))
+    result = run(["put", "-r", str(src), "backup"], env)
+    assert result.exit_code == 0, result.output
+    assert set(_uploaded_paths(upload)) == {
+        "backup/a.txt",
+        "backup/sub/b.txt",
+        "backup/sub/deep/c.txt",
+    }
+    assert "loop" in result.stderr
+    assert "out (not a regular file" in result.stderr
 
 
 @respx.mock
