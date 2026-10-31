@@ -8,19 +8,31 @@ https://github.com/thenervelab/hippius-console/blob/ebae2d8e5f8c347d65a7530a668f
 info="hippius-share-comments-v1", L=32)``, then AES-256-GCM with a 12-byte
 nonce and the 16-byte tag appended. The AAD is ``<token>:comment`` or
 ``<token>:viewer-name``, so a ciphertext copied onto another link does not
-open. A comment's plaintext is the compact JSON ``{"text":...,"name":...}``;
-a viewer name's is ``{"name":...}``. The server stores the bytes and cannot
-read them. ``tests/vectors/share-comments-vectors.json`` is the console's
-vector file, copied verbatim.
+open. A comment's plaintext is the compact JSON ``{"text":...,"name":...}``,
+with ``"mentions"`` after them when it tags anyone; a viewer name's is
+``{"name":...}``. The server stores the bytes and cannot read them.
+``tests/vectors/share-comments-vectors.json`` is the console's vector file,
+copied verbatim.
+
+A named comment also sends a viewer id, so the owner's insights count it
+under one viewer. It is the console's ``viewer-id.ts`` scheme:
+``base64url(HMAC-SHA256(secret, token))[:16 bytes]``, unpadded, where the
+secret is 32 random bytes the poster keeps. One secret gives one id per
+link, and ids on two links cannot be tied together without it.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import os
+import re
 import unicodedata
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Literal
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -41,8 +53,24 @@ MAX_COMMENT_CIPHERTEXT = 4096
 MAX_NAME_CHARS = 80
 """Names are cut to this many code points, as the console does."""
 
+MAX_MENTIONS = 10
+"""The console's limit on mentions in one comment; any past it are dropped."""
+
+VIEWER_SECRET_LEN = 32
+"""Bytes in a viewer secret, as the console's ``SECRET_BYTES``."""
+
 _SHARE_KEY_LEN = 32
 _NONCE_LEN = 12
+_VIEWER_ID_LEN = 16
+
+# The console's MAX_MENTION_REF_CHARS, in UTF-16 code units: comment ids
+# are short server ids, and a longer reference is not one.
+_MAX_MENTION_REF_UNITS = 128
+
+# The console's display-name.ts: an access-key account's generated username
+# is "user_" and its whole address, lowercased; a bare address is base58.
+_GENERATED_USERNAME = re.compile(r"user_([1-9A-Za-z]{40,64})")
+_BARE_ADDRESS = re.compile(r"[1-9A-HJ-NP-Za-km-z]{40,64}")
 
 # ECMAScript String.prototype.trim: WhiteSpace plus LineTerminator. Python's
 # str.strip() also strips U+0085 and U+001C-U+001F, which JS keeps, and the
@@ -119,16 +147,39 @@ class SealedText:
 
 
 @dataclass(frozen=True)
+class CommentMention:
+    """Someone a comment tags, sealed inside it so the server never learns who.
+
+    The text carries the tag as ``@`` and ``name``; this says which ``@``
+    is a mention and who it points at. A client without mentions still
+    reads ``@Ada`` in the text.
+
+    Attributes:
+        kind: ``owner`` tags the link's owner. ``commenter`` tags someone
+            who commented under a name.
+        name: The name after the ``@`` in the text.
+        comment: For ``commenter``, the id of one of their comments on this
+            link, which is how their own client knows the mention is them.
+    """
+
+    kind: Literal["owner", "commenter"]
+    name: str
+    comment: str | None = None
+
+
+@dataclass(frozen=True)
 class CommentText:
     """An opened comment.
 
     Attributes:
         text: What the commenter wrote.
         name: The name they posted under, cleaned; None when anonymous or blank.
+        mentions: Who it tags, cleaned as the console does; empty when nobody.
     """
 
     text: str
     name: str | None
+    mentions: tuple[CommentMention, ...] = field(default=())
 
 
 def comment_key(share_key: bytes) -> bytes:
@@ -149,13 +200,38 @@ def comment_key(share_key: bytes) -> bytes:
     return hkdf.derive(share_key)
 
 
-def seal_comment(key: bytes, token: str, text: str) -> SealedText:
-    """Encrypt an anonymous comment (``"name": null``) under a fresh nonce.
+def comment_text(text: str) -> str:
+    """The text as it will be sealed: lone surrogates as U+FFFD, trimmed.
+
+    Raises:
+        ValueError: If nothing is left, or it is over 2,000 characters.
+    """
+    clean = _well_formed(text).strip(_JS_TRIM)
+    if not clean:
+        raise ValueError("comment is empty")
+    if len(clean) > MAX_COMMENT_CHARS:
+        raise ValueError(f"comment is over {MAX_COMMENT_CHARS} characters")
+    return clean
+
+
+def seal_comment(
+    key: bytes,
+    token: str,
+    text: str,
+    *,
+    name: str | None = None,
+    mentions: Sequence[CommentMention] = (),
+) -> SealedText:
+    """Encrypt a comment under a fresh nonce, as the console's ``encryptComment``.
 
     Args:
         key: From :func:`comment_key`.
         token: The share token, bound into the AAD.
         text: The comment. Trimmed; lone surrogates become U+FFFD.
+        name: The name to post under, cleaned by :func:`clean_name`; None
+            seals ``"name": null``.
+        mentions: Who it tags, in the order their ``@`` stands in the text.
+            Cleaned and capped as :func:`parse_mentions` does.
 
     Returns:
         The ciphertext and nonce to post.
@@ -164,34 +240,147 @@ def seal_comment(key: bytes, token: str, text: str) -> SealedText:
         ValueError: If the text is empty, over 2,000 characters, or seals to
             more than 4,096 bytes.
     """
-    clean = _well_formed(text).strip(_JS_TRIM)
-    if not clean:
-        raise ValueError("comment is empty")
-    if len(clean) > MAX_COMMENT_CHARS:
-        raise ValueError(f"comment is over {MAX_COMMENT_CHARS} characters")
-    plaintext = comment_plaintext(clean, None)
+    clean = comment_text(text)
+    wire = [mention_wire(mention) for mention in mentions]
+    plaintext = comment_plaintext(clean, clean_name(name), parse_mentions(wire))
     sealed = _seal(key, _aad(token, "comment"), plaintext, os.urandom(_NONCE_LEN))
     if len(base64.b64decode(sealed.ciphertext)) > MAX_COMMENT_CIPHERTEXT:
         raise ValueError(f"comment seals to more than {MAX_COMMENT_CIPHERTEXT} bytes")
     return sealed
 
 
-def comment_plaintext(text: str, name: str | None) -> bytes:
-    """The exact bytes the console seals for a comment without mentions.
+def seal_viewer_name(key: bytes, token: str, name: str) -> SealedText:
+    """Encrypt the name the owner's insights list a viewer under.
+
+    Args:
+        key: From :func:`comment_key`.
+        token: The share token, bound into the AAD.
+        name: Cleaned by :func:`clean_name` first.
+
+    Raises:
+        ValueError: If the name cleans to nothing.
+    """
+    clean = clean_name(name)
+    if clean is None:
+        raise ValueError("name is blank")
+    plaintext = json.dumps({"name": clean}, ensure_ascii=False, separators=(",", ":")).encode()
+    return _seal(key, _aad(token, "viewer-name"), plaintext, os.urandom(_NONCE_LEN))
+
+
+def comment_plaintext(
+    text: str, name: str | None, mentions: Sequence[CommentMention] = ()
+) -> bytes:
+    """The exact bytes the console seals for a comment.
 
     ``JSON.stringify`` output: no spaces, non-ASCII written as UTF-8, not
-    escaped. ``text`` and ``name`` must already be well formed.
+    escaped. ``mentions`` is left out when empty, so a comment without them
+    seals to the bytes it always did. ``text``, ``name`` and the mentions
+    must already be clean.
     """
-    return json.dumps(
-        {"text": text, "name": name}, ensure_ascii=False, separators=(",", ":")
-    ).encode()
+    value: dict[str, object] = {"text": text, "name": name}
+    if mentions:
+        value["mentions"] = [mention_wire(mention) for mention in mentions]
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def mention_wire(mention: CommentMention) -> dict[str, str]:
+    """A mention as the plaintext JSON holds it: ``comment`` only when set."""
+    wire = {"kind": mention.kind, "name": mention.name}
+    if mention.comment is not None:
+        wire["comment"] = mention.comment
+    return wire
+
+
+def parse_mentions(raw: object) -> tuple[CommentMention, ...]:
+    """The mentions a comment carries, cleaned, as the console's ``parseMentions``.
+
+    Lenient on purpose: a malformed entry (another client's, or a newer
+    kind) is dropped on its own and never makes the comment unreadable.
+    Names are cleaned by :func:`clean_name`; past ten the rest are dropped.
+    """
+    if not isinstance(raw, list):
+        return ()
+    found: list[CommentMention] = []
+    for item in raw:
+        if len(found) >= MAX_MENTIONS:
+            break
+        mention = _one_mention(item)
+        if mention is not None:
+            found.append(mention)
+    return tuple(found)
+
+
+def _one_mention(item: object) -> CommentMention | None:
+    if not isinstance(item, dict):
+        return None
+    kind = item.get("kind")
+    raw_name = item.get("name")
+    name = clean_name(raw_name if isinstance(raw_name, str) else None)
+    if name is None:
+        return None
+    if kind == "owner":
+        return CommentMention("owner", name)
+    if kind != "commenter":
+        return None
+    comment = item.get("comment")
+    if isinstance(comment, str) and 0 < _utf16_units(comment) <= _MAX_MENTION_REF_UNITS:
+        return CommentMention("commenter", name, comment)
+    return CommentMention("commenter", name)
+
+
+def viewer_id(secret: bytes, token: str) -> str:
+    """The viewer id a named comment on ``token`` is counted under.
+
+    ``base64url(HMAC-SHA256(secret, token))[:16 bytes]``, unpadded: the
+    console's ``getViewerId``. The same secret gives the same id on one
+    link and unrelated ids on two.
+
+    Args:
+        secret: 32 random bytes the poster keeps.
+        token: The share token.
+
+    Raises:
+        ValueError: If ``secret`` is not 32 bytes.
+    """
+    if len(secret) != VIEWER_SECRET_LEN:
+        raise ValueError(f"viewer secret must be {VIEWER_SECRET_LEN} bytes, got {len(secret)}")
+    mac = hmac.new(secret, token.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac[:_VIEWER_ID_LEN]).decode().rstrip("=")
+
+
+def present_name(name: str | None) -> str | None:
+    """A name as the console shows it: an access-key account's address shortened.
+
+    The console's ``presentName``: a generated ``user_<address>`` username,
+    or a whole SS58 address standing alone, shows as its first 6 and last 4
+    characters; any other name is only trimmed. None for no name.
+    """
+    if name is None:
+        return None
+    trimmed = name.strip(_JS_TRIM)
+    if not trimmed:
+        return None
+    generated = _GENERATED_USERNAME.fullmatch(trimmed)
+    if generated:
+        return short_address(generated.group(1))
+    if _BARE_ADDRESS.fullmatch(trimmed):
+        return short_address(trimmed)
+    return trimmed
+
+
+def short_address(ss58: str) -> str:
+    """An address as the console shortens it: first 6, an ellipsis, last 4."""
+    head, tail = 6, 4
+    if len(ss58) <= head + tail + 2:
+        return ss58
+    return f"{ss58[:head]}\u2026{ss58[-tail:]}"
 
 
 def open_comment(key: bytes, token: str, ciphertext: str, nonce: str) -> CommentText:
     """Decrypt a comment from the listing.
 
-    Fields this SDK does not know (the console's ``mentions``) are ignored;
-    the text still reads ``@Name``.
+    Fields this SDK does not know are ignored. A malformed mention is
+    dropped on its own, as the console does.
 
     Args:
         key: From :func:`comment_key`.
@@ -211,7 +400,8 @@ def open_comment(key: bytes, token: str, ciphertext: str, nonce: str) -> Comment
     name = value.get("name") if isinstance(value, dict) else None
     if not isinstance(text, str) or (name is not None and not isinstance(name, str)):
         raise DecryptError("share comment is not a comment")
-    return CommentText(_well_formed(text), clean_name(name))
+    mentions = parse_mentions(value.get("mentions")) if isinstance(value, dict) else ()
+    return CommentText(_well_formed(text), clean_name(name), mentions)
 
 
 def open_viewer_name(
@@ -302,6 +492,11 @@ def _well_formed(value: str) -> str:
     surrogate left in a Python string has no partner.
     """
     return "".join("\ufffd" if ord(char) in _SURROGATES else char for char in value)
+
+
+def _utf16_units(value: str) -> int:
+    """The length JavaScript's ``String.length`` reports."""
+    return len(value.encode("utf-16-le")) // 2
 
 
 def _aad(token: str, kind: str) -> bytes:
