@@ -528,8 +528,8 @@ def put(
     With -r, LOCAL is a directory and REMOTE the directory it lands in ("" for
     the folder root). Each file follows the rules above; a file that already
     exists is reported and the rest still upload, then the command exits 3.
-    Symlinks and other non-regular files are skipped and named on stderr.
-    Empty directories are created. Any other error stops the upload at that
+    Symlinks, Windows junctions and other non-regular files are skipped and
+    named on stderr. Empty directories are created. Any other error stops the upload at that
     file and exits 1; files uploaded before it stay.
     """
     explicit = base_revision is not None or revision_seq is not None
@@ -683,8 +683,8 @@ class _Tree:
     Attributes:
         files: Each regular file and the remote path it goes to, in walk order.
         empty_dirs: Remote paths of directories with nothing to upload below them.
-        skipped: Symlinks and other non-regular entries, with the remote path
-            each would have had.
+        skipped: Symlinks, junctions and other non-regular entries, with the
+            remote path each would have had.
     """
 
     files: list[tuple[Path, str]]

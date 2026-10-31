@@ -1919,7 +1919,7 @@ def test_put_recursive_skips_windows_junctions(env: dict[str, str], tmp_path: Pa
         "backup/sub/b.txt",
         "backup/sub/deep/c.txt",
     }
-    assert "loop" in result.stderr
+    assert "loop (not a regular file" in result.stderr
     assert "out (not a regular file" in result.stderr
 
 
