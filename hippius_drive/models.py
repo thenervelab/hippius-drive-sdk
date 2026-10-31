@@ -728,10 +728,13 @@ class MintedShare(_Wire):
         share_token: The plaintext capability. The server stores only its hash
             for folder shares; file-share listings do echo this token.
         expires_at: RFC 3339, or None when the share does not expire.
+        link_envelope: Folder-share create only: the server stored the link's
+            envelope. False from a server that predates link-secret links.
     """
 
     share_token: str
     expires_at: str | None = None
+    link_envelope: bool = False
 
 
 class ShareSettings(_Wire):
@@ -1119,6 +1122,16 @@ class InviteMeta(_Wire):
     role: str = "writer"
     valid: bool = False
     path_prefix: str | None = None
+
+
+class FolderLinkKey(_Wire):
+    """``GET /v1/folder-shares/{token}/link-key``: a ``#s=`` link's sealed drive key.
+
+    Attributes:
+        envelope: Standard base64 of the 73-byte envelope.
+    """
+
+    envelope: str
 
 
 class InviteLinkKey(_Wire):

@@ -1,9 +1,12 @@
 """File and folder share links, matching hcfs-client ``client/share.rs``.
 
 A public link carries the raw 32-byte key in the ``#k=`` fragment. A password
-link carries an Argon2id wrap in ``#p=`` and never the raw key. The fragment
-is not sent to the server. The filename is a separate XChaCha20-Poly1305
-ciphertext; file bytes use the framed cipher in :mod:`hippius_drive.crypto.file_cipher`.
+link carries an Argon2id wrap in ``#p=`` and never the raw key. A folder link
+minted today carries a link secret instead of the drive key (``#s=``, or
+``#sp=`` under the same password wrap); see
+:mod:`hippius_drive.crypto.folder_link`. The fragment is not sent to the
+server. The filename is a separate XChaCha20-Poly1305 ciphertext; file bytes
+use the framed cipher in :mod:`hippius_drive.crypto.file_cipher`.
 """
 
 from __future__ import annotations
@@ -45,16 +48,21 @@ _FOLDER_PATH_LEN = 3
 class ShareSecret:
     """The fragment secret for one share.
 
-    ``private`` is the whole distinction between a ``#k=`` link and a ``#p=``
-    link. A wrap blob read back as a raw key would publish a password-free URL.
+    The two flags pick the fragment: ``#k=``, ``#p=`` (``private``), ``#s=``
+    (``link_secret``) or ``#sp=`` (both). They mirror the owner-wrap flags. A
+    wrap blob read back as a raw key would publish a password-free URL, and a
+    link secret read back as a key would publish a link that never opens.
 
     Attributes:
-        material: 32-byte key, or an 89-byte password wrap.
+        material: 32 bytes (a key or a link secret), or an 89-byte password wrap.
         private: True when ``material`` is a password wrap.
+        link_secret: True when the 32 bytes, wrapped or not, are a folder link
+            secret rather than the key itself. Folder shares only.
     """
 
     material: bytes = field(repr=False)
     private: bool = False
+    link_secret: bool = False
 
     def __post_init__(self) -> None:
         """Reject a secret whose length does not match its kind."""
@@ -143,7 +151,8 @@ def folder_share_url_private(console_base_url: str, token: str, wrapped: bytes) 
 def share_url(console_base_url: str, token: str, secret: ShareSecret, *, folder: bool) -> str:
     """Build the recipient URL for ``secret``.
 
-    A private secret only ever produces a ``#p=`` link.
+    A private secret only ever produces a ``#p=`` or ``#sp=`` link, and a link
+    secret only a ``#s=`` or ``#sp=`` one.
 
     Args:
         console_base_url: Console origin.
@@ -153,7 +162,16 @@ def share_url(console_base_url: str, token: str, secret: ShareSecret, *, folder:
 
     Returns:
         The recipient URL.
+
+    Raises:
+        ValueError: If a link secret is given for a file share, or the token
+            or origin is unusable.
     """
+    if secret.link_secret:
+        if not folder:
+            raise ValueError("a folder link secret cannot build a file-share URL")
+        kind = "sp" if secret.private else "s"
+        return _url(console_base_url, token, kind, _b64url(secret.material), folder=True)
     if secret.private:
         return _private_url(console_base_url, token, secret.material, folder=folder)
     return _public_url(console_base_url, token, secret.material, folder=folder)
@@ -174,6 +192,8 @@ def parse_share_url(url: str) -> ParsedShareUrl:
     parts = urlsplit(url)
     token, folder = _share_path(parts.scheme, parts.netloc, parts.path)
     secret = _fragment_secret(parts.fragment)
+    if secret.link_secret and not folder:
+        raise ValueError("a file share URL needs a #k= or #p= fragment")
     return ParsedShareUrl(folder=folder, token=token, secret=secret)
 
 
@@ -371,11 +391,19 @@ def _share_path(scheme: str, netloc: str, path: str) -> tuple[str, bool]:
     raise ValueError("share URL path must be /share/{token} or /share/folder/{token}")
 
 
+# (prefix, private, link_secret). Once the "=" is included no prefix is a
+# prefix of another ("sp=" does not start with "s="), so order does not matter.
+_FRAGMENTS = (
+    ("k=", False, False),
+    ("p=", True, False),
+    ("s=", False, True),
+    ("sp=", True, True),
+)
+
+
 def _fragment_secret(fragment: str) -> ShareSecret:
-    if fragment.startswith("k="):
-        raw = _b64url_decode(fragment[2:])
-        return ShareSecret(raw, private=False)
-    if fragment.startswith("p="):
-        raw = _b64url_decode(fragment[2:])
-        return ShareSecret(raw, private=True)
-    raise ValueError("share URL needs a #k= or #p= fragment")
+    for prefix, private, link_secret in _FRAGMENTS:
+        if fragment.startswith(prefix):
+            raw = _b64url_decode(fragment[len(prefix) :])
+            return ShareSecret(raw, private=private, link_secret=link_secret)
+    raise ValueError("share URL needs a #k=, #p=, #s= or #sp= fragment")

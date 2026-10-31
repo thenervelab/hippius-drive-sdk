@@ -11,7 +11,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 
@@ -193,7 +193,7 @@ class ShareOps:
         Returns:
             The filename and plaintext.
         """
-        token, key = _links.share_key_from_url(share_url, password, folder=False)
+        token, key = _links.share_key_from_url(share_url, password)
         meta = self._client.run(_ops.share_meta(token))
         with self._client.transport.stream(_ops.share_blob(token)) as response:
             data = _decrypt(response, key)
@@ -408,23 +408,29 @@ class FolderShareOps:
     def create(self, spec: _links.FolderShareSpec) -> CreatedShare:
         """Mint a link to an existing drive prefix.
 
-        The fragment key is this drive's file key. A member names the owner and
-        checks ``member_folder_shares`` first, so a flag-off server is not
-        confused with a missing drive.
+        The fragment is a fresh link secret (``#s=``, ``#sp=`` with a
+        password), never the drive key; the server keeps the drive key sealed
+        under it. A member names the owner and checks ``member_folder_shares``
+        first, so a flag-off server is not confused with a missing drive.
 
         Args:
             spec: Prefix, display name, ttl, and optional password.
 
         Returns:
             The token, the URL, and the expiry.
+
+        Raises:
+            InvalidResponse: If the server did not store the link's envelope.
+                The share is revoked first.
         """
         identity = self._client.identity
-        body = _links.folder_share_body(identity, spec)
+        body, secret = _links.prepare_folder_share(identity, spec)
         if identity.role != "owner":
             caps = _links.capabilities_or_disabled(self._client.run)
             _links.require_member_folder_shares(caps)
-        secret = _links.folder_share_secret(identity, spec)
         minted = self._client.run(_ops.create_folder_share(body))
+        if not minted.link_envelope:
+            self._revoke_unopenable(minted.share_token)
         return _links.finish_folder_share(minted, secret, spec)
 
     def list(self) -> Sequence[FolderShare]:
@@ -471,7 +477,9 @@ class FolderShareOps:
         """Upload wraps so another device can rebuild these folder-share URLs.
 
         The wrap carries the plaintext token, because the listing returns only
-        ``token_hash``.
+        ``token_hash``. Take each secret from the minted URL,
+        ``sharing.parse_share_url(created.share_url).secret``: a secret built
+        from the drive key would rebuild as a ``#k=`` URL that carries it.
 
         Args:
             master_mnemonic: The minter's master phrase.
@@ -501,16 +509,16 @@ class FolderShareOps:
         Args:
             share_url: A URL returned by :meth:`create`.
             path: Directory relative to the share prefix.
-            password: Required when the URL is a ``#p=`` link.
+            password: Required when the URL is a ``#p=`` or ``#sp=`` link.
             offset: Starting file index.
             limit: Page size.
 
         Returns:
             The page. Page on ``has_more``.
         """
-        token, _key = _links.share_key_from_url(share_url, password, folder=True)
+        link = _links.folder_link_from_url(share_url, password)
         relative = _links.recipient_path(path)
-        return self._client.run(_ops.folder_share_browse(token, relative, offset, limit))
+        return self._client.run(_ops.folder_share_browse(link.token, relative, offset, limit))
 
     def get(self, share_url: str, path: str, *, password: str | None = None) -> bytes:
         """Download and decrypt one file inside a folder share.
@@ -518,13 +526,14 @@ class FolderShareOps:
         Args:
             share_url: A URL returned by :meth:`create`.
             path: File path relative to the share prefix.
-            password: Required when the URL is a ``#p=`` link.
+            password: Required when the URL is a ``#p=`` or ``#sp=`` link.
 
         Returns:
             The plaintext.
         """
-        token, key = _links.share_key_from_url(share_url, password, folder=True)
-        request = _ops.folder_share_blob(token, _links.recipient_path(path))
+        link = _links.folder_link_from_url(share_url, password)
+        key = self._file_key(link)
+        request = _ops.folder_share_blob(link.token, _links.recipient_path(path))
         with self._client.transport.stream(request) as response:
             return _decrypt(response, key)
 
@@ -532,6 +541,20 @@ class FolderShareOps:
         caps = _links.capabilities_or_disabled(self._client.run)
         if not caps.folder_share_revoke_by_hash:
             raise ValueError("this server does not address folder shares by token_hash")
+
+    def _revoke_unopenable(self, token: str) -> NoReturn:
+        try:
+            self._client.run(_ops.revoke_folder_share(token))
+        except errors.DriveError as exc:
+            raise _links.envelope_not_stored() from exc
+        raise _links.envelope_not_stored()
+
+    def _file_key(self, link: _links.FolderLinkUrl) -> bytes:
+        if not link.link_secret:
+            return link.material
+        proof = _links.folder_link_proof(link)
+        found = self._client.run(_ops.folder_link_key(link.token, proof))
+        return _links.open_folder_link_key(link, found)
 
 
 class DriveOps:
@@ -760,7 +783,7 @@ class AsyncShareOps:
 
     async def open(self, share_url: str, *, password: str | None = None) -> OpenedShare:
         """Async twin of :meth:`ShareOps.open`."""
-        token, key = _links.share_key_from_url(share_url, password, folder=False)
+        token, key = _links.share_key_from_url(share_url, password)
         meta = await self._client.run(_ops.share_meta(token))
         async with self._client.transport.stream(_ops.share_blob(token)) as response:
             data = await _decrypt_async(response, key)
@@ -876,12 +899,13 @@ class AsyncFolderShareOps:
     async def create(self, spec: _links.FolderShareSpec) -> CreatedShare:
         """Async twin of :meth:`FolderShareOps.create`."""
         identity = self._client.identity
-        body = _links.folder_share_body(identity, spec)
+        body, secret = _links.prepare_folder_share(identity, spec)
         if identity.role != "owner":
             caps = await _links.capabilities_or_disabled_async(self._client.run)
             _links.require_member_folder_shares(caps)
-        secret = _links.folder_share_secret(identity, spec)
         minted = await self._client.run(_ops.create_folder_share(body))
+        if not minted.link_envelope:
+            await self._revoke_unopenable(minted.share_token)
         return _links.finish_folder_share(minted, secret, spec)
 
     async def list(self) -> Sequence[FolderShare]:
@@ -931,14 +955,15 @@ class AsyncFolderShareOps:
         limit: int | None = None,
     ) -> FolderSharePage:
         """Async twin of :meth:`FolderShareOps.browse`."""
-        token, _key = _links.share_key_from_url(share_url, password, folder=True)
+        link = _links.folder_link_from_url(share_url, password)
         relative = _links.recipient_path(path)
-        return await self._client.run(_ops.folder_share_browse(token, relative, offset, limit))
+        return await self._client.run(_ops.folder_share_browse(link.token, relative, offset, limit))
 
     async def get(self, share_url: str, path: str, *, password: str | None = None) -> bytes:
         """Async twin of :meth:`FolderShareOps.get`."""
-        token, key = _links.share_key_from_url(share_url, password, folder=True)
-        request = _ops.folder_share_blob(token, _links.recipient_path(path))
+        link = _links.folder_link_from_url(share_url, password)
+        key = await self._file_key(link)
+        request = _ops.folder_share_blob(link.token, _links.recipient_path(path))
         async with self._client.transport.stream(request) as response:
             return await _decrypt_async(response, key)
 
@@ -946,6 +971,20 @@ class AsyncFolderShareOps:
         caps = await _links.capabilities_or_disabled_async(self._client.run)
         if not caps.folder_share_revoke_by_hash:
             raise ValueError("this server does not address folder shares by token_hash")
+
+    async def _revoke_unopenable(self, token: str) -> NoReturn:
+        try:
+            await self._client.run(_ops.revoke_folder_share(token))
+        except errors.DriveError as exc:
+            raise _links.envelope_not_stored() from exc
+        raise _links.envelope_not_stored()
+
+    async def _file_key(self, link: _links.FolderLinkUrl) -> bytes:
+        if not link.link_secret:
+            return link.material
+        proof = _links.folder_link_proof(link)
+        found = await self._client.run(_ops.folder_link_key(link.token, proof))
+        return _links.open_folder_link_key(link, found)
 
 
 class AsyncDriveOps:

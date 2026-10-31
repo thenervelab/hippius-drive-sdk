@@ -70,7 +70,7 @@ def link_key(share_url: str, password: str | None) -> tuple[str, bytes]:
         ValueError: If the URL is not a file share, or a ``#p=`` link has no password.
         DecryptError: If the password does not open the link.
     """
-    token, share_key = _links.share_key_from_url(share_url, password, folder=False)
+    token, share_key = _links.share_key_from_url(share_url, password)
     return token, comments.comment_key(share_key)
 
 
