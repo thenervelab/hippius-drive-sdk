@@ -4,16 +4,19 @@ Python SDK and CLI for Hippius Drive (HCFS), an end-to-end encrypted file store.
 Files are encrypted and signed on your machine; the server only ever holds
 ciphertext and cannot read your data.
 
-Pure Python — no Rust toolchain, no compiled extension, and the crypto is
-readable in this repository rather than shipped as a binary. (The optional
-`login` extra adds native signing wheels; the core install never imports them.)
+The package itself is pure Python, and its crypto is readable in the
+[source repository](https://github.com/thenervelab/hippius-drive-sdk) rather
+than shipped as a binary. Its dependencies (`cryptography`, `pynacl`, `blake3`,
+`argon2-cffi`) ship binary wheels for common platforms, so no Rust or C
+toolchain is needed. The optional `login` extra adds native signing wheels; the
+core install never imports them.
 
 ```bash
 pip install hippius-drive
 pip install "hippius-drive[login]"   # plus access-key sign-in
 ```
 
-Unreleased changes on `main` install from this repository:
+Unreleased changes on `main` install from the source repository:
 `pip install "git+https://github.com/thenervelab/hippius-drive-sdk"`.
 
 Python 3.10 to 3.13.
@@ -47,7 +50,7 @@ See [docs/quickstart.md](https://github.com/thenervelab/hippius-drive-sdk/blob/m
 [docs/cli.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/docs/cli.md) for the `hippius-drive` command line.
 
 **Agents:** read [AGENTS.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/AGENTS.md). It is the instruction set for using
-this SDK and for changing this repository. Point an agent at that file.
+this SDK and for changing its source. Point an agent at that file.
 
 ## Where the account address comes from
 
@@ -100,7 +103,7 @@ are replayed when that file is committed; until the hcfs exporter lands, the
 interim oracle is the hex and strings pinned in the unit tests (see
 `tests/vectors/README.md`).
 
-This repository's live suite (`pytest -m e2e`) runs in CI when
+The live suite (`pytest -m e2e`) runs in CI when
 `HIPPIUS_TEST_*` secrets are present. It covers registration, upload
 (single-shot and chunked session), download, listing, browse, search,
 optimistic-concurrency conflicts, rename, delete, and a file-share round trip

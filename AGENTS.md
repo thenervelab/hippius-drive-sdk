@@ -348,7 +348,11 @@ different field names, fix the replay in the same PR that commits the file.
 - Comments explain invariants and tradeoffs, not what the code already says.
 - Behaviour changes need tests next to the change. Do not weaken the coverage
   floor to land a branch; add the test in the same commit.
-- New dependencies: pin exact versions (`==`), then `uv run pip-audit`.
+- New dependencies: a lower bound at the current version (`>=`) in
+  `pyproject.toml`, then `uv run pip-audit`. This is a library on PyPI: exact
+  pins would fail to resolve next to any other package that needs a different
+  patch of the same dependency, and would hold users back from its security
+  fixes. `uv.lock` pins every version for CI and development.
   GitHub Actions: pin to SHA with a version comment;
   `persist-credentials: false` on checkout.
 
