@@ -25,7 +25,9 @@ dependencies = [
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
+  "Environment :: Console",
   "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -48,6 +50,7 @@ login = [
 hippius-drive = "hippius_drive.cli:run"
 
 [project.urls]
+Documentation = "https://github.com/thenervelab/hippius-drive-sdk/blob/main/docs/quickstart.md"
 Source = "https://github.com/thenervelab/hippius-drive-sdk"
 Issues = "https://github.com/thenervelab/hippius-drive-sdk/issues"
 

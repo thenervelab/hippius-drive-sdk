@@ -8,12 +8,13 @@ Pure Python — no Rust toolchain, no compiled extension, and the crypto is
 readable in this repository rather than shipped as a binary. (The optional
 `login` extra adds native signing wheels; the core install never imports them.)
 
-It is not published on PyPI. Install from this repository:
-
 ```bash
-pip install "git+https://github.com/thenervelab/hippius-drive-sdk"
-pip install "hippius-drive[login] @ git+https://github.com/thenervelab/hippius-drive-sdk"   # plus access-key sign-in
+pip install hippius-drive
+pip install "hippius-drive[login]"   # plus access-key sign-in
 ```
+
+Unreleased changes on `main` install from this repository:
+`pip install "git+https://github.com/thenervelab/hippius-drive-sdk"`.
 
 Python 3.10 to 3.13.
 
@@ -42,10 +43,10 @@ put the same bytes on the wire; the clients still differ in region selection
 (`Client` probes, `AsyncClient` defaults to EU unless you pass `server_url`)
 and in how a float timeout applies to request-body writes.
 
-See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough, and
-[docs/cli.md](docs/cli.md) for the `hippius-drive` command line.
+See [docs/quickstart.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/docs/quickstart.md) for the full walkthrough, and
+[docs/cli.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/docs/cli.md) for the `hippius-drive` command line.
 
-**Agents:** read [AGENTS.md](AGENTS.md). It is the instruction set for using
+**Agents:** read [AGENTS.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/AGENTS.md). It is the instruction set for using
 this SDK and for changing this repository. Point an agent at that file.
 
 ## Where the account address comes from
@@ -84,7 +85,7 @@ interoperability needs the second.
 
 The server stores ciphertext and never receives your recovery phrase or
 encryption key. What that does and does not protect is written out in
-[docs/security.md](docs/security.md), including the metadata the server does
+[docs/security.md](https://github.com/thenervelab/hippius-drive-sdk/blob/main/docs/security.md), including the metadata the server does
 see — file sizes, timestamps, and (when you send them) plaintext paths.
 
 **Your recovery phrase is the only thing that can decrypt your files.** Nobody

@@ -6,7 +6,8 @@ SDK". Humans: the same facts live in [README.md](README.md),
 [docs/quickstart.md](docs/quickstart.md), [docs/cli.md](docs/cli.md), and
 [docs/security.md](docs/security.md); this file is the operational subset.
 
-Distribution name: `hippius-drive`, not published on PyPI: install with
+Install: `pip install hippius-drive` (`"hippius-drive[login]"` for access-key
+sign-in); unreleased `main` with
 `pip install "git+https://github.com/thenervelab/hippius-drive-sdk"`. Import:
 `hippius_drive`. Python 3.10–3.13.
 
