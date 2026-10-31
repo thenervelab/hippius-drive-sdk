@@ -61,7 +61,10 @@ dev = [
   "respx==0.23.1",
   "ruff==0.16.7",
   "ty==0.0.80",
-  "pip-audit==2.10.1",
+  # pip-audit runs only in the 3.13 audit job. Its cache dependency filelock has
+  # no release free of the 2026-10 advisories that supports 3.10 (4.1.1 and later
+  # need 3.11), so 3.10 environments skip it rather than install a known-bad one.
+  "pip-audit==2.10.1; python_version >= '3.11'",
   "pytest-cov==7.1.0",
   "anyio==4.15.1",
   "py-sr25519-bindings==0.2.4",
