@@ -10,6 +10,7 @@ from hippius_drive.auth import login as login
 from hippius_drive.auth import login_async as login_async
 from hippius_drive.client import AsyncClient as AsyncClient
 from hippius_drive.client import Client as Client
+from hippius_drive.crypto.comments import CommentMention as CommentMention
 from hippius_drive.errors import Conflict as Conflict
 from hippius_drive.errors import DecryptError as DecryptError
 from hippius_drive.errors import DriveError as DriveError
@@ -29,6 +30,7 @@ from hippius_drive.errors import Unauthorized as Unauthorized
 from hippius_drive.identity import Identity as Identity
 from hippius_drive.models import AcceptedInvite as AcceptedInvite
 from hippius_drive.models import BrowseOptions as BrowseOptions
+from hippius_drive.models import CommentAuthor as CommentAuthor
 from hippius_drive.models import CreatedInvite as CreatedInvite
 from hippius_drive.models import CreatedShare as CreatedShare
 from hippius_drive.models import DriveMembership as DriveMembership
@@ -49,6 +51,8 @@ __all__ = [
     "AsyncClient",
     "BrowseOptions",
     "Client",
+    "CommentAuthor",
+    "CommentMention",
     "Conflict",
     "CreatedInvite",
     "CreatedShare",

@@ -18,6 +18,8 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer, StrictBool
 
+from hippius_drive.crypto.comments import VIEWER_SECRET_LEN, CommentMention
+
 
 def _to_bytes(value: Any) -> Any:
     """Accept a JSON int array, hex string, or bytes for a byte field."""
@@ -931,6 +933,11 @@ class ShareComment:
         blocked: The owner blocked its author through this comment. Only the
             owner's listing carries it.
         deleted: A stand-in for a deleted comment that still has replies.
+        mentions: Who it tags, in the order their ``@Name`` stands in ``text``.
+            Empty when nobody, or when it does not open.
+        mentions_me: One of ``mentions`` is the reader: an ``owner`` mention
+            when this account owns the link, a ``commenter`` mention that
+            points at a comment of this account's (``mine``).
         name_claimed: Not the owner's comment, yet its name is the owner's
             or claims to be Hippius, the owner, support or an admin. The name
             is sealed by whoever posted it; only ``owner`` is vouched for by
@@ -949,6 +956,35 @@ class ShareComment:
     blocked: bool
     deleted: bool
     name_claimed: bool = False
+    mentions: tuple[CommentMention, ...] = ()
+    mentions_me: bool = False
+
+
+@dataclass(frozen=True)
+class CommentAuthor:
+    """Who a named comment is posted as. Without one, a comment is anonymous.
+
+    The owner's insights count a named comment under a viewer id derived
+    from ``viewer_secret`` and the link, as the console derives it from a
+    secret kept in the browser. Keep one secret and reuse it, so every
+    comment on a link counts as the same viewer; the CLI keeps one beside
+    the mnemonic file. Any 32 random bytes will do (``os.urandom(32)``).
+
+    Attributes:
+        name: Shown with the comment and in the owner's insights. A whole
+            SS58 address, or an access-key account's generated
+            ``user_<address>`` name, is shortened as the console shortens it.
+        viewer_secret: 32 bytes. Never sent: the server gets an HMAC of the
+            link's token under it.
+    """
+
+    name: str
+    viewer_secret: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """Refuse a secret of the wrong size before anything is sealed."""
+        if len(self.viewer_secret) != VIEWER_SECRET_LEN:
+            raise ValueError(f"viewer_secret must be {VIEWER_SECRET_LEN} bytes")
 
 
 class ShareSummary(_Wire):

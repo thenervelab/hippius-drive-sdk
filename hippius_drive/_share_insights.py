@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import unicodedata
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from hippius_drive import _links, errors
 from hippius_drive._wire import check_comment_id
 from hippius_drive.crypto import comments, owner_wrap, sharing
+from hippius_drive.crypto.comments import CommentMention
 from hippius_drive.models import (
     Capabilities,
+    CommentAuthor,
     CommentPage,
     CommentRow,
     ShareComment,
@@ -34,6 +38,10 @@ REACTIONS = (
     "\U0001f64c",
 )
 """The reactions a link takes, in the order the share page shows them (hcfs ``REACTIONS``)."""
+
+OWNER_MENTION_NAME = "Owner"
+"""How the owner is tagged before they have commented under a name (the console's)."""
+
 
 MAX_MOMENT_MS = 604_800_000
 """Seven days: the longest a view may report, and the latest moment hcfs takes."""
@@ -141,39 +149,192 @@ def viewer_names(insights: ShareInsights, token: str, key: bytes) -> dict[str, s
     """Each viewer's name by ``viewer_id``, for the names that open under ``key``."""
     names: dict[str, str] = {}
     for viewer in insights.viewers:
-        name = comments.open_viewer_name(key, token, viewer.name_ct, viewer.name_nonce)
+        opened = comments.open_viewer_name(key, token, viewer.name_ct, viewer.name_nonce)
+        name = comments.present_name(opened)
         if name is not None:
             names[viewer.viewer_id] = name
     return names
 
 
-def comment_body(
-    token: str, key: bytes, text: str, *, parent_id: str | None, at_ms: int | None
-) -> dict[str, Any]:
-    """Seal an anonymous comment into the ``POST .../comments`` body.
+@dataclass(frozen=True)
+class CommentDraft:
+    """A comment to post, as the namespaces hand it over.
 
-    Only anonymous comments are posted. A named one needs the page's
-    per-link viewer id, which the console derives from a secret kept in the
-    browser; an id made up here would count as a new viewer in the owner's
-    insights on every post.
+    Attributes:
+        text: The comment.
+        parent_id: The top-level comment it answers, or None.
+        at_ms: The moment of the video, or None. Not on a reply.
+        author: Who it is posted as; None posts anonymously.
+        mentions: Who it tags; each one's ``@Name`` must be in ``text``.
+    """
+
+    text: str
+    parent_id: str | None = None
+    at_ms: int | None = None
+    author: CommentAuthor | None = None
+    mentions: Sequence[CommentMention] = ()
+
+
+def comment_body(token: str, key: bytes, draft: CommentDraft) -> dict[str, Any]:
+    """Seal a comment into the ``POST .../comments`` body, as the console's ``buildCommentPost``.
+
+    A named comment carries its name twice, sealed differently: inside the
+    comment, and on its own (``name_ct``) for the owner's viewer list, beside
+    the viewer id it is counted under. An anonymous one sends neither.
 
     Raises:
         ValueError: If the text is empty or too long, the parent id is not a
-            comment id, ``at_ms`` is negative, or a reply names a moment.
+            comment id, ``at_ms`` is negative, a reply names a moment, the
+            name is blank, or a mention's ``@Name`` is not in the text.
     """
-    body: dict[str, Any] = {"anonymous": True}
-    if parent_id is not None:
-        if at_ms is not None:
+    body: dict[str, Any] = {}
+    if draft.parent_id is not None:
+        if draft.at_ms is not None:
             raise ValueError("a reply takes its parent's moment: leave at_ms out")
-        body["parent_id"] = check_comment_id(parent_id)
-    if at_ms is not None:
-        if at_ms < 0:
+        body["parent_id"] = check_comment_id(draft.parent_id)
+    if draft.at_ms is not None:
+        if draft.at_ms < 0:
             raise ValueError("at_ms must be zero or more")
-        body["at_ms"] = at_ms
-    sealed = comments.seal_comment(key, token, text)
+        body["at_ms"] = draft.at_ms
+    text = comments.comment_text(draft.text)
+    mentions = collect_mentions(text, draft.mentions)
+    name = _author_name(draft.author)
+    sealed = comments.seal_comment(key, token, text, name=name, mentions=mentions)
     body["ciphertext"] = sealed.ciphertext
     body["nonce"] = sealed.nonce
+    if draft.author is None or name is None:
+        body["anonymous"] = True
+        return body
+    sealed_name = comments.seal_viewer_name(key, token, name)
+    body["anonymous"] = False
+    body["viewer_id"] = comments.viewer_id(draft.author.viewer_secret, token)
+    body["name_ct"] = sealed_name.ciphertext
+    body["name_nonce"] = sealed_name.nonce
     return body
+
+
+def _author_name(author: CommentAuthor | None) -> str | None:
+    """The name a comment is posted under; the console posts a blank one anonymously.
+
+    Raises:
+        ValueError: If the author's name is blank: posting it anonymously
+            instead would surprise a caller who named one.
+    """
+    if author is None:
+        return None
+    name = comments.clean_name(comments.present_name(author.name))
+    if name is None:
+        raise ValueError("the comment author's name is blank")
+    return name
+
+
+def collect_mentions(text: str, picked: Sequence[CommentMention]) -> list[CommentMention]:
+    """The mentions to seal, as the console's ``collectMentions``.
+
+    Every ``@Name`` in the text for someone picked, in the order they stand,
+    at most ten. Where two overlap (``@Ada`` inside ``@Ada Lovelace``) the
+    longer wins. Duplicate picks count once.
+
+    Raises:
+        ValueError: If a pick's ``@Name`` is nowhere in the text as a whole
+            word; the console drops such a pick, but here it is a caller's
+            mistake.
+    """
+    distinct = list(dict.fromkeys(picked))
+    found: list[tuple[int, int, CommentMention]] = []
+    for mention in distinct:
+        at = _find_tag(text, mention.name, 0)
+        if at == -1:
+            raise ValueError(f"@{mention.name} is not in the comment text")
+        while at != -1:
+            end = at + 1 + len(mention.name)
+            found.append((at, end, mention))
+            at = _find_tag(text, mention.name, end)
+    found.sort(key=lambda item: (item[0], -item[1]))
+    chosen: list[CommentMention] = []
+    last_end = 0
+    for at, end, mention in found:
+        if at < last_end:
+            continue
+        chosen.append(mention)
+        last_end = end
+        if len(chosen) >= comments.MAX_MENTIONS:
+            break
+    return chosen
+
+
+def _find_tag(text: str, name: str, start: int) -> int:
+    """Where ``@name`` next stands as a whole word in ``text``, from ``start``; -1 if nowhere."""
+    needle = f"@{name}"
+    at = text.find(needle, start)
+    while at != -1:
+        end = at + len(needle)
+        if not _word_char(text[at - 1 : at]) and not _word_char(text[end : end + 1]):
+            return at
+        at = text.find(needle, at + 1)
+    return -1
+
+
+def _word_char(char: str) -> bool:
+    """The console's ``WORD``: a letter, digit, mark or underscore may not touch a mention."""
+    return char == "_" or (char != "" and unicodedata.category(char)[0] in "LNM")
+
+
+def mention_candidates(
+    thread: Sequence[ShareComment], *, reader_owns_link: bool
+) -> list[CommentMention]:
+    """Who the reader can tag, as the console's ``mentionCandidates``.
+
+    The owner first (unless the reader is the owner), under the name of
+    their newest named comment or ``Owner``; then everyone else who
+    commented under a name, newest first, each pointing at their newest
+    comment. Anonymous comments, unreadable ones and the reader's own offer
+    nobody.
+    """
+    newest_first = sorted(thread, key=lambda item: item.created_at or "", reverse=True)
+    owner_name: str | None = None
+    commenters: dict[str, CommentMention] = {}
+    for item in newest_first:
+        if item.anonymous or item.text is None:
+            continue
+        name = comments.clean_name(comments.present_name(item.name))
+        if name is None:
+            continue
+        if item.owner:
+            owner_name = owner_name or name
+        elif not item.mine and name not in commenters:
+            commenters[name] = CommentMention("commenter", name, item.id)
+    if reader_owns_link:
+        return list(commenters.values())
+    owner = CommentMention("owner", owner_name or OWNER_MENTION_NAME)
+    return [owner, *(c for c in commenters.values() if c.name != owner_name)]
+
+
+def mark_mentions(thread: Sequence[ShareComment], *, reader_owns_link: bool) -> list[ShareComment]:
+    """Set ``mentions_me`` where a comment tags the reader, as the console's ``mentionsYou``."""
+    mine = {item.id for item in thread if item.mine}
+    return [
+        dataclasses.replace(item, mentions_me=True)
+        if any(_is_reader(m, mine, reader_owns_link) for m in item.mentions)
+        else item
+        for item in thread
+    ]
+
+
+def mentions_owner(thread: Sequence[ShareComment]) -> bool:
+    """Whether any comment tags the owner, so whether ownership must be looked up."""
+    return any(m.kind == "owner" for item in thread for m in item.mentions)
+
+
+def _is_reader(mention: CommentMention, mine: set[str], reader_owns_link: bool) -> bool:
+    if mention.kind == "owner":
+        return reader_owns_link
+    return mention.comment is not None and mention.comment in mine
+
+
+def owns_link(rows: Sequence[ShareSummary], token: str) -> bool:
+    """Whether ``token`` is one of this account's shares."""
+    return any(row.share_token == token for row in rows)
 
 
 def require_replies(caps: Capabilities, parent_id: str | None) -> None:
@@ -261,8 +422,7 @@ def owner_share_url(
 
 
 def _open_row(row: CommentRow, token: str, key: bytes) -> ShareComment:
-    text: str | None = None
-    name: str | None = None
+    opened: comments.CommentText | None = None
     if not row.deleted and row.ciphertext and row.nonce:
         try:
             opened = comments.open_comment(key, token, row.ciphertext, row.nonce)
@@ -270,8 +430,10 @@ def _open_row(row: CommentRow, token: str, key: bytes) -> ShareComment:
             # Any signed-in account can post bytes this key cannot read; one
             # such comment must not hide the rest of the thread.
             opened = None
-        if opened is not None:
-            text, name = opened.text, opened.name
+    text = None if opened is None else opened.text
+    # The console shows no name on an anonymous comment whatever it sealed,
+    # and shortens a name posted before access-key names were shortened.
+    name = None if opened is None or row.anonymous else comments.present_name(opened.name)
     return ShareComment(
         id=row.id,
         parent_id=row.parent_id,
@@ -284,4 +446,5 @@ def _open_row(row: CommentRow, token: str, key: bytes) -> ShareComment:
         owner=row.owner,
         blocked=row.blocked,
         deleted=row.deleted,
+        mentions=() if opened is None else opened.mentions,
     )
