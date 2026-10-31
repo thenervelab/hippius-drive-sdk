@@ -126,6 +126,11 @@ PARITY_CASES: list[tuple[str, Callable[[Client], Any], Callable[[AsyncClient], A
         lambda c: c.files.delete_many(["aa", "bb"], quiet=True),
         lambda c: c.files.delete_many(["aa", "bb"], quiet=True),
     ),
+    (
+        "delete_many_expected",
+        lambda c: c.files.delete_many(["aa"], expected_revisions={"aa": bytes([3] * 32)}),
+        lambda c: c.files.delete_many(["aa"], expected_revisions={"aa": bytes([3] * 32)}),
+    ),
 ]
 
 

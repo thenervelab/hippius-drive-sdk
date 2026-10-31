@@ -46,6 +46,12 @@ a walk must advance by the rows a page actually returned, never by the limit
 it asked for. ``/get_state`` is a separate, larger cap (5000).
 """
 
+MAX_BATCH_DELETE = 1000
+"""Server cap on ``/delete_files`` (``MAX_BATCH_DELETE_FILES``)."""
+
+MAX_FOLDER_ENTRIES_BATCH = 500
+"""Directory paths one ``/register_folder_entries`` request may carry."""
+
 MIN_SEARCH_QUERY_LENGTH = 3
 """Shortest ``q``, after trimming, that ``/search_files`` will match on.
 
@@ -438,11 +444,14 @@ class BatchDeleteError(_Wire):
 
     Attributes:
         file_id: The id that failed.
-        error: Why it failed.
+        code: Machine-readable reason, e.g. ``conflict`` when the file moved
+            past the revision ``expected_revisions`` named.
+        message: Human-readable reason.
     """
 
     file_id: str = ""
-    error: str = ""
+    code: str = ""
+    message: str = ""
 
 
 class BatchDeleteResult(_Wire):
@@ -736,10 +745,13 @@ class MintedShare(_Wire):
         share_token: The plaintext capability. The server stores only its hash
             for folder shares; file-share listings do echo this token.
         expires_at: RFC 3339, or None when the share does not expire.
+        link_envelope: Folder-share create only: the server stored the link's
+            envelope. False from a server that predates link-secret links.
     """
 
     share_token: str
     expires_at: str | None = None
+    link_envelope: bool = False
 
 
 class ShareSettings(_Wire):
@@ -1186,6 +1198,16 @@ class InviteMeta(_Wire):
     role: str = "writer"
     valid: bool = False
     path_prefix: str | None = None
+
+
+class FolderLinkKey(_Wire):
+    """``GET /v1/folder-shares/{token}/link-key``: a ``#s=`` link's sealed drive key.
+
+    Attributes:
+        envelope: Standard base64 of the 73-byte envelope.
+    """
+
+    envelope: str
 
 
 class InviteLinkKey(_Wire):

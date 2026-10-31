@@ -101,7 +101,7 @@ not in `__all__` — the CLI and the quickstart both import it.
 | Block a commenter on your link | `client.shares.block_author(token, comment_id)` / `unblock_author(token, comment_id)` — unblock through a comment of theirs still on the link |
 | Clear your link's "new" counts | `client.shares.mark_insights_seen(token)` — `insights()` does not; needs `share_listing_counts` |
 | Rebuild your share's URL | `client.shares.recover_url(token, master_phrase)` — needs the owner wrap the console stores |
-| Mint a folder-share link | `client.folder_shares.create(FolderShareSpec(prefix, name))` — fragment is the drive file key |
+| Mint a folder-share link | `client.folder_shares.create(FolderShareSpec(prefix, name))` — `#s=` (or `#sp=` with a password): a link secret; the server keeps the drive key sealed under it |
 | Revoke a folder share | `client.folder_shares.revoke(token_or_hash)` — list returns `token_hash` only |
 | Invite someone to this drive | `client.drives.create_invite(InviteSpec(folder_mnemonic, role="writer"))` — a `#i=` link when the server advertises `drive_invite_link_envelopes`, else `#k=` |
 | Join a drive | `client.drives.accept(url, member_master, member_ss58=account)` — `#k=` or `#i=`, whole drive or one folder (`accepted.path_prefix`) |
@@ -213,7 +213,10 @@ hippius-drive init --phrase-file F          # import; never printed
 hippius-drive whoami                        # first check on a 403
 hippius-drive register
 hippius-drive put report.pdf work/report.pdf
+hippius-drive put -r ./reports work/reports # a tree; existing files refused (exit 3)
+hippius-drive sync ./reports work/reports   # one way: new/changed only; --delete to prune
 hippius-drive get work/report.pdf out.pdf   # path or 64-char file id
+hippius-drive get -r work/reports ./reports
 hippius-drive ls work
 hippius-drive ls --all                      # includes rows with no plaintext path
 hippius-drive mv work/a.pdf archive/a.pdf   # looks up the revision for you
@@ -240,7 +243,7 @@ Replacing via CLI: `put --overwrite` (compare-and-swap on the revision it
 reads; a lost race and a plain put onto an existing path both exit 3), or
 explicit `--base-revision` and `--revision-seq`. Share and
 invite commands print the URL once; that URL is the key. Failures print one
-line and exit 1 — no traceback (exit 3 for a `put` conflict). Full flag list: [docs/cli.md](docs/cli.md).
+line and exit 1 — no traceback (exit 3 for a `put`, `put -r` or `sync` conflict). Full flag list: [docs/cli.md](docs/cli.md).
 
 A member client's `account_ss58` is the drive **owner**. The bearer token is
 the member's. Do not recompute `folder_hash` from a label the member chose;
@@ -248,7 +251,8 @@ use the hash from the invite or the membership row.
 
 ### Not in v1 — do not invent these
 
-The sync engine, recovery bindings, mnemonic-blob **server** endpoints, admin
+The two-way sync engine (three-tree state; the CLI `sync` is one-way and
+stateless), recovery bindings, mnemonic-blob **server** endpoints, admin
 endpoints, and S3-gateway variants are out of scope. The `crypto/` module does
 implement both local mnemonic-at-rest formats (`enc_mnemonic.json` and the
 console Argon2id sealed blob), plus the share-link, owner-wrap, and grant
@@ -263,8 +267,12 @@ formats the console and desktop client already use.
 - The phrase is the only way to decrypt an owned folder. Losing it loses the
   data, including files members uploaded into a shared drive. It cannot be
   rotated without orphaning everything already stored.
-- A folder-share `#k=` is the drive file key. A shared-drive invite gives the
-  member that same file key. It does not give them the owner's master phrase.
+- A folder-share link minted here is `#s=` / `#sp=`: a link secret, not the
+  drive key. Opening it fetches the drive file key from the server, so anyone
+  who opens it holds that key. Older `#k=` / `#p=` links carry the key itself;
+  the server no longer mints them (`link_envelope_required`). A shared-drive
+  invite gives the member the drive file key too, not the owner's master
+  phrase.
 - File **contents** are encrypted on the machine (XChaCha20-Poly1305 frames).
   Paths, names, sizes, and timestamps are visible to the server. Use opaque
   names for anything sensitive. Full model: [docs/security.md](docs/security.md).
@@ -283,7 +291,7 @@ uv run pytest                 # unit/property/respx; coverage floor 98%; skips e
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check
-uv run pip-audit
+uv run pip-audit               # Python 3.11+ only; CI audits on 3.13
 uv run pytest -m e2e --no-cov # live; needs HIPPIUS_TEST_TOKEN,
                               # HIPPIUS_TEST_ACCOUNT_SS58, HIPPIUS_TEST_MNEMONIC
 ```
@@ -309,7 +317,7 @@ secrets are present. Fork PRs skip e2e. The required check is the `ci` job.
 | `identity.py` | Account + per-folder keys; member role; ToS / rename signing text |
 | `models.py` | Pydantic wire types; byte fields as JSON int arrays |
 | `errors.py` | `DriveError` tree, including `Gone` |
-| `crypto/` | Hashes, KDF, framed cipher, mnemonic-at-rest, share links, owner wrap, grants, share comments |
+| `crypto/` | Hashes, KDF, framed cipher, mnemonic-at-rest, share links, folder-link envelopes, owner wrap, grants, share comments |
 | `_links.py` | Share and invite specs, URL finish, grant open. Re-exported specs are public |
 | `_share_insights.py` | File-share settings, insights, comments: bodies, capability checks, decrypt |
 | `_namespaces.py` | Sync and async namespace objects. Not subclasses of each other |
@@ -382,7 +390,7 @@ different field names, fix the replay in the same PR that commits the file.
 
 ### What not to do
 
-- Do not add v1-excluded features (sync, recovery, admin, S3-gateway) unless
+- Do not add v1-excluded features (two-way sync, recovery, admin, S3-gateway) unless
   the task explicitly is that work.
 - Do not SS58-encode a key and call it `account_ss58`.
 - Do not log phrases, tokens, or folder keys in tests beyond the already-public
