@@ -158,6 +158,16 @@ AAD), the same format the console uses. The server stores the ciphertext and
 cannot read it. It does see when each comment was posted, the video moment it
 points at, which comment a reply answers, whether it is anonymous, and the
 reaction counts. Anyone holding the link can read every comment on it.
+Mentions are sealed inside the comment, so the server does not learn who
+was tagged.
+
+A named comment also sends a viewer id: an HMAC-SHA256 of the link's token
+under a 32-byte secret the poster keeps (the CLI keeps it in `viewer-secret`
+beside the mnemonic file). The server stores a per-link pseudonym of it, so
+your named comments on one link count as one viewer in the owner's insights,
+and ids on two links cannot be joined without the secret. The name is sent
+twice, both times encrypted: inside the comment, and on its own for the
+owner's viewer list.
 
 ## Shared drives
 

@@ -62,7 +62,8 @@ def test_console_comments_open(kind: str) -> None:
 
     opened = comments.open_comment(KEY, TOKEN, vector["ciphertext_b64"], vector["nonce_b64"])
 
-    assert opened == comments.CommentText(expected["text"], expected["name"])
+    mentions = comments.parse_mentions(expected.get("mentions"))
+    assert opened == comments.CommentText(expected["text"], expected["name"], mentions)
 
 
 def test_a_console_viewer_name_opens() -> None:

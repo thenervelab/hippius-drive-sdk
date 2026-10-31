@@ -274,6 +274,7 @@ HIPPIUS_SHARE_URL="$(cat link.txt)" hippius-drive share comments --json
 hippius-drive share comment-post "see 0:42" TOKEN --at-ms 42000
 hippius-drive share comment-post - TOKEN < comment.txt   # text from stdin
 hippius-drive share comment-post "agreed" TOKEN --reply-to 41
+hippius-drive share comment-post "thanks @Ada" TOKEN --name Grace --mention Ada
 hippius-drive share comment-rm TOKEN 41
 hippius-drive share reactions TOKEN
 hippius-drive share react 👍 TOKEN                        # one of 👍 ❤️ 😂 😮 🎉 👏 🔥 🙌
@@ -295,8 +296,28 @@ from `HIPPIUS_SHARE_PASSWORD` only; there is no flag, because argv is visible
 to other processes. `insights` reads the numbers without the key and shows
 viewer names only when it has one; otherwise it says why they are hidden.
 
-Posted comments are anonymous. Reading is open to anyone with the link;
-posting needs a signed-in account and the owner's `comments` switch on.
+Comments are posted anonymously unless `--name` is given. Reading is open to
+anyone with the link; posting needs a signed-in account and the owner's
+`comments` switch on.
+
+A named comment is counted in the owner's insights under a viewer id, as
+the console counts it: an HMAC of the link's token under a secret this
+install keeps. The first named comment creates that secret, 32 random bytes,
+in `viewer-secret` beside the mnemonic file (owner-only, 0600), and every
+later one reuses it, so your comments on one link count as one viewer and
+your ids on two links cannot be tied together. Delete the file to start
+over as a new viewer. A name that is a whole account address, or an
+access-key account's generated `user_<address>`, is posted shortened, as the
+console does.
+
+`--mention NAME` tags someone the comments offer: the owner (`owner` always
+names them) and everyone else who commented under a name. NAME is matched
+exactly as the comments show it, so a shortened address needs its `…`. TEXT
+must contain `@` and the name the comments show: for the owner that is the
+name of their newest named comment, or `Owner` until they have one. If no
+one matches, the error lists who is offered. The tags are sealed inside the
+comment, so the server never learns who was tagged. `comments` adds `(mentions you)` to a comment
+that tags you, and `--json` has `mentions` and `mentions_me`.
 Comment text and names come from anyone with the link. Plain output prints a
 name as a quoted string, so it cannot pass for the `[owner]` badge the server
 vouches for, and adds ` (viewer)` after a name that claims to be the owner or

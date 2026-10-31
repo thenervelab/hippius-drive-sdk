@@ -7,8 +7,10 @@ one record per line, with ``--json`` on the read commands for scripts.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -20,11 +22,20 @@ from typing import Any, Literal
 
 import click
 
-from hippius_drive import FileShareSpec, FolderShareSpec, InviteSpec, __version__, _config, errors
+from hippius_drive import (
+    CommentAuthor,
+    FileShareSpec,
+    FolderShareSpec,
+    InviteSpec,
+    __version__,
+    _config,
+    errors,
+)
 from hippius_drive import auth as api_auth
 from hippius_drive._config import Config
 from hippius_drive.client import Client
-from hippius_drive.crypto import hashes, kdf, mnemonic_store, sharing
+from hippius_drive.crypto import comments, hashes, kdf, mnemonic_store, sharing
+from hippius_drive.crypto.comments import VIEWER_SECRET_LEN, CommentMention, mention_wire
 from hippius_drive.identity import Identity
 from hippius_drive.models import (
     MAX_BATCH_DELETE,
@@ -52,6 +63,12 @@ ENV_INVITE_URL = "HIPPIUS_INVITE_URL"
 
 ENV_SHARE_URL = "HIPPIUS_SHARE_URL"
 """Environment variable the share comment and insights commands read a link from."""
+
+_VIEWER_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+"""The console's stored form: 32 bytes of unpadded base64url."""
+
+VIEWER_SECRET_FILE = "viewer-secret"  # noqa: S105 - a file name, not a secret
+"""File beside the mnemonic file holding the secret named comments derive a viewer id from."""
 
 ENV_SHARE_PASSWORD = "HIPPIUS_SHARE_PASSWORD"  # noqa: S105 - a variable name, not a secret
 """Environment variable holding a ``#p=`` link's password. There is no flag: argv is visible."""
@@ -1420,6 +1437,13 @@ def share_comments(obj: Context, token: str | None, url_file: Path | None, as_js
 @_URL_FILE
 @click.option("--reply-to", default=None, help="Id of the top-level comment to answer.")
 @click.option("--at-ms", type=int, default=None, help="Moment of the video, in milliseconds.")
+@click.option("--name", default=None, help="Post under this name instead of anonymously.")
+@click.option(
+    "--mention",
+    "mentions",
+    multiple=True,
+    help="Tag someone the comments offer (repeatable); TEXT must contain @ and the name.",
+)
 @click.pass_obj
 def share_comment_post(
     obj: Context,
@@ -1428,17 +1452,34 @@ def share_comment_post(
     url_file: Path | None,
     reply_to: str | None,
     at_ms: int | None,
+    name: str | None,
+    mentions: tuple[str, ...],
 ) -> None:
-    """Post TEXT as an anonymous comment on a file share. Prints its id.
+    """Post TEXT as a comment on a file share, anonymously unless --name. Prints its id.
 
     TEXT ``-`` reads the comment from stdin, so it stays out of shell history.
+    A named comment is counted in the owner's insights under a viewer id
+    derived from a secret kept in ``viewer-secret`` beside the mnemonic file.
     """
+    if name is not None and comments.clean_name(comments.present_name(name)) is None:
+        raise click.ClickException(
+            "--name is blank: give a name, or leave it out to post anonymously"
+        )
     if text == "-":
         text = sys.stdin.read()
     with obj.client() as client:
         link = _require_link(obj, client, token, url_file)
+        password = _link_password(link)
+        tagged = _pick_mentions(client, link, password, mentions)
+        author = None if name is None else CommentAuthor(name, _viewer_secret(obj))
         posted = client.shares.post_comment(
-            link, text, password=_link_password(link), parent_id=reply_to, at_ms=at_ms
+            link,
+            text,
+            password=password,
+            parent_id=reply_to,
+            at_ms=at_ms,
+            author=author,
+            mentions=tagged,
         )
     click.echo(f"posted {posted.id}")
 
@@ -1820,6 +1861,71 @@ def _link_password(link: str) -> str | None:
     return password
 
 
+def _pick_mentions(
+    client: Client, link: str, password: str | None, names: tuple[str, ...]
+) -> list[CommentMention]:
+    """The candidates named on the command line; ``owner`` also names the owner."""
+    if not names:
+        return []
+    offered = client.shares.mention_candidates(link, password=password)
+    picked: list[CommentMention] = []
+    for wanted in names:
+        match = next((c for c in offered if _names_candidate(wanted, c)), None)
+        if match is None:
+            shown = ", ".join(json.dumps(c.name, ensure_ascii=False) for c in offered) or "none"
+            raise click.ClickException(
+                f"nobody to tag as {json.dumps(wanted, ensure_ascii=False)}; offered: {shown}"
+            )
+        picked.append(match)
+    return picked
+
+
+def _names_candidate(wanted: str, candidate: CommentMention) -> bool:
+    if candidate.kind == "owner" and wanted.casefold() == "owner":
+        return True
+    return wanted == candidate.name
+
+
+def _viewer_secret(obj: Context) -> bytes:
+    """This install's viewer secret, made on first use: the console's per-browser secret.
+
+    32 random bytes, unpadded base64url as the console stores it, in an
+    owner-only file beside the mnemonic file.
+    """
+    path = obj.config.mnemonic_file.parent / VIEWER_SECRET_FILE
+    _create_viewer_secret(path)
+    raw = _read_secret(path)
+    if not _VIEWER_SECRET_RE.fullmatch(raw):
+        raise click.ClickException(f"{path} is not a viewer secret; delete it")
+    return base64.urlsafe_b64decode(raw + "=")
+
+
+def _create_viewer_secret(path: Path) -> None:
+    """Put a fresh secret at ``path`` unless something is already there.
+
+    The secret is written to a temporary file first and then hard-linked
+    into place, which fails if ``path`` exists. A reader therefore sees
+    either no file or a whole secret, and two commands racing on first use
+    both end up with the one that was linked first.
+    """
+    value = base64.urlsafe_b64encode(os.urandom(VIEWER_SECRET_LEN)).decode().rstrip("=")
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".viewer-secret-")
+    except OSError as exc:
+        raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+        os.link(tmp, path)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 def _viewer_names(
     obj: Context, client: Client, token: str, found: ShareInsights, url_file: Path | None
 ) -> tuple[dict[str, str], str | None]:
@@ -1876,6 +1982,8 @@ def _comment_row(item: ShareComment) -> dict[str, Any]:
         "owner": item.owner,
         "blocked": item.blocked,
         "deleted": item.deleted,
+        "mentions": [mention_wire(mention) for mention in item.mentions],
+        "mentions_me": item.mentions_me,
     }
 
 
@@ -1887,7 +1995,8 @@ def _comment_line(row: dict[str, Any]) -> str:
     else:
         text = _terminal_safe(row["text"])
     when = f"{row['created_at'] or '-':<20}  {_moment(row['at_ms']):>8}"
-    return f"{row['id']:>6}  {when}  {_author(row)}: {text}"
+    you = "  (mentions you)" if row["mentions_me"] else ""
+    return f"{row['id']:>6}  {when}  {_author(row)}: {text}{you}"
 
 
 def _author(row: dict[str, Any]) -> str:

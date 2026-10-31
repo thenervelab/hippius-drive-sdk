@@ -93,6 +93,8 @@ not in `__all__` — the CLI and the quickstart both import it.
 | A file share's views | `client.shares.insights(token)` — free plan: counts + `locked`; names: `client.shares.viewer_names(stats, share_url)` |
 | Read a file share's comments | `client.shares.comments(share_url)` — decrypted; `text=None` when one will not open; trust `owner`, not `name` (`name_claimed`) |
 | Comment / delete a comment | `client.shares.post_comment(share_url, text)` (anonymous) / `client.shares.delete_comment(token, id)` |
+| Comment under a name | `post_comment(share_url, text, author=CommentAuthor(name, viewer_secret))` — keep one 32-byte secret: it is what the owner's insights count you by |
+| Tag someone (@mention) | `who = client.shares.mention_candidates(share_url)`, then `post_comment(share_url, "@Ada hi", mentions=[ada])` — the `@name` must be in the text; `comments()` sets `mentions_me` |
 | Reaction counts | `client.shares.reactions(token)` |
 | React / take it back | `client.shares.react(token, emoji)` / `unreact(token, emoji)` — `emoji` in `hippius_drive.REACTIONS`; `react_at(token, emoji, at_ms)` sends it at a video moment (never retried) |
 | Reaction moments | `client.shares.reaction_moments(token)` — needs `share_reaction_moments` |
@@ -224,6 +226,7 @@ hippius-drive share settings TOKEN --comments on   # paid Drive plan
 hippius-drive share insights TOKEN
 hippius-drive share comments --url-file F         # or HIPPIUS_SHARE_URL; TOKEN alone for your own console link
 hippius-drive share comment-post "text" --url-file F   # TEXT - reads stdin; #p= password only via HIPPIUS_SHARE_PASSWORD
+hippius-drive share comment-post "@Ada hi" --name Grace --mention Ada --url-file F   # viewer-secret beside the mnemonic file
 hippius-drive share reactions TOKEN
 hippius-drive share react 🔥 TOKEN [--at-ms 98000]   # unreact EMOJI TOKEN takes it back
 hippius-drive share moments TOKEN

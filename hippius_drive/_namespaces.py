@@ -19,9 +19,11 @@ from hippius_drive import _links, _ops, _share_insights, errors
 from hippius_drive._upload import SPOOL_MAX, PlaintextSource, reader_over
 from hippius_drive._wire import check_comment_id, parse_envelope
 from hippius_drive.crypto import file_cipher, invite_link
+from hippius_drive.crypto.comments import CommentMention
 from hippius_drive.crypto.sharing import ShareSecret
 from hippius_drive.models import (
     AcceptedInvite,
+    CommentAuthor,
     CreatedInvite,
     CreatedShare,
     DriveInvites,
@@ -313,12 +315,54 @@ class ShareOps:
             password: Required when the URL is a ``#p=`` link.
 
         Returns:
-            Comments and replies; group replies by ``parent_id``.
+            Comments and replies; group replies by ``parent_id``. A comment
+            that tags this account has ``mentions_me``. When one tags the
+            owner and the thread does not show whether you are the owner,
+            the share listing is read once to tell; if this account may not
+            list shares (``Forbidden``), owner mentions are left unmarked.
 
         Raises:
             ValueError: If the server has ``share_comments`` off.
         """
         token, key = _share_insights.link_key(share_url, password)
+        thread = self._thread(token, key)
+        owns = _share_insights.mentions_owner(thread) and self._owns_or_unknown(thread, token)
+        return _share_insights.mark_mentions(thread, reader_owns_link=owns)
+
+    def _owns_or_unknown(self, thread: Sequence[ShareComment], token: str) -> bool:
+        """Whether this account owns the link; False when it may not list its shares."""
+        if _share_insights.thread_shows_owner(thread):
+            return True
+        try:
+            return _share_insights.owns_link(self.list(), token)
+        except errors.Forbidden:
+            return False
+
+    def mention_candidates(
+        self, share_url: str, *, password: str | None = None
+    ) -> Sequence[CommentMention]:
+        """Who this account can tag in a comment on a file share, as the console offers them.
+
+        The owner first (unless you are the owner), then everyone else who
+        commented under a name, newest first. Pass the ones you tag to
+        :meth:`post_comment` as ``mentions``, with ``@`` and their ``name``
+        in the text. Reads the comments and the share listing.
+
+        Args:
+            share_url: The recipient URL; its fragment is the key.
+            password: Required when the URL is a ``#p=`` link.
+
+        Raises:
+            ValueError: If the server has ``share_comments`` off.
+        """
+        token, key = _share_insights.link_key(share_url, password)
+        thread = self._thread(token, key)
+        owns = _share_insights.thread_shows_owner(thread) or _share_insights.owns_link(
+            self.list(), token
+        )
+        return _share_insights.mention_candidates(thread, reader_owns_link=owns)
+
+    def _thread(self, token: str, key: bytes) -> Sequence[ShareComment]:
         _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
         found: list[ShareComment] = []
         seen: set[str] = set()
@@ -330,7 +374,9 @@ class ShareOps:
             if after is None:
                 return _share_insights.mark_claimed_names(found)
 
-    def post_comment(
+    # Each option is independent and keyword-only, and the common call is
+    # post_comment(url, "text"); a spec object would make that two lines.
+    def post_comment(  # noqa: PLR0913
         self,
         share_url: str,
         text: str,
@@ -338,11 +384,14 @@ class ShareOps:
         password: str | None = None,
         parent_id: str | None = None,
         at_ms: int | None = None,
+        author: CommentAuthor | None = None,
+        mentions: Sequence[CommentMention] = (),
     ) -> PostedComment:
-        """Post an anonymous comment, encrypted under the link's key.
+        """Post a comment, encrypted under the link's key. Anonymous without ``author``.
 
         Never retried: a lost response could otherwise post it twice. The
-        owner turning comments off is ``Forbidden`` ``comments-off``.
+        owner turning comments off is ``Forbidden`` ``comments-off``; an
+        account the owner blocked gets ``Forbidden`` ``blocked``.
 
         Args:
             share_url: The recipient URL; its fragment is the key.
@@ -350,6 +399,10 @@ class ShareOps:
             password: Required when the URL is a ``#p=`` link.
             parent_id: Reply to this top-level comment.
             at_ms: The moment of the video the comment points at. Not on a reply.
+            author: Post under this name, counted in the owner's insights
+                under a viewer id derived from its secret.
+            mentions: Who the text tags, from :meth:`mention_candidates`.
+                Each one's ``@`` and ``name`` must be in ``text``.
 
         Returns:
             The new comment's id.
@@ -358,7 +411,10 @@ class ShareOps:
             ValueError: For bad input, or a server without the needed capability.
         """
         token, key = _share_insights.link_key(share_url, password)
-        body = _share_insights.comment_body(token, key, text, parent_id=parent_id, at_ms=at_ms)
+        draft = _share_insights.CommentDraft(
+            text=text, parent_id=parent_id, at_ms=at_ms, author=author, mentions=mentions
+        )
+        body = _share_insights.comment_body(token, key, draft)
         caps = _links.capabilities_or_disabled(self._client.run)
         _share_insights.require_comments(caps)
         _share_insights.require_replies(caps, parent_id)
@@ -964,6 +1020,30 @@ class AsyncShareOps:
     ) -> Sequence[ShareComment]:
         """Async twin of :meth:`ShareOps.comments`."""
         token, key = _share_insights.link_key(share_url, password)
+        thread = await self._thread(token, key)
+        owns = _share_insights.mentions_owner(thread) and await self._owns_or_unknown(thread, token)
+        return _share_insights.mark_mentions(thread, reader_owns_link=owns)
+
+    async def _owns_or_unknown(self, thread: Sequence[ShareComment], token: str) -> bool:
+        if _share_insights.thread_shows_owner(thread):
+            return True
+        try:
+            return _share_insights.owns_link(await self.list(), token)
+        except errors.Forbidden:
+            return False
+
+    async def mention_candidates(
+        self, share_url: str, *, password: str | None = None
+    ) -> Sequence[CommentMention]:
+        """Async twin of :meth:`ShareOps.mention_candidates`."""
+        token, key = _share_insights.link_key(share_url, password)
+        thread = await self._thread(token, key)
+        owns = _share_insights.thread_shows_owner(thread) or _share_insights.owns_link(
+            await self.list(), token
+        )
+        return _share_insights.mention_candidates(thread, reader_owns_link=owns)
+
+    async def _thread(self, token: str, key: bytes) -> Sequence[ShareComment]:
         caps = await _links.capabilities_or_disabled_async(self._client.run)
         _share_insights.require_comments(caps)
         found: list[ShareComment] = []
@@ -976,7 +1056,7 @@ class AsyncShareOps:
             if after is None:
                 return _share_insights.mark_claimed_names(found)
 
-    async def post_comment(
+    async def post_comment(  # noqa: PLR0913 - see ShareOps.post_comment
         self,
         share_url: str,
         text: str,
@@ -984,10 +1064,15 @@ class AsyncShareOps:
         password: str | None = None,
         parent_id: str | None = None,
         at_ms: int | None = None,
+        author: CommentAuthor | None = None,
+        mentions: Sequence[CommentMention] = (),
     ) -> PostedComment:
         """Async twin of :meth:`ShareOps.post_comment`."""
         token, key = _share_insights.link_key(share_url, password)
-        body = _share_insights.comment_body(token, key, text, parent_id=parent_id, at_ms=at_ms)
+        draft = _share_insights.CommentDraft(
+            text=text, parent_id=parent_id, at_ms=at_ms, author=author, mentions=mentions
+        )
+        body = _share_insights.comment_body(token, key, draft)
         caps = await _links.capabilities_or_disabled_async(self._client.run)
         _share_insights.require_comments(caps)
         _share_insights.require_replies(caps, parent_id)
