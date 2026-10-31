@@ -112,7 +112,8 @@ def test_a_named_comment_makes_a_secret_once_and_keeps_its_viewer_id(
     assert first.output == "posted 50\n"
     assert _sent(route)["viewer_id"] == first_id
     path = _secret_file(env)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     raw = path.read_text().strip()
     secret = base64.urlsafe_b64decode(raw + "=")
     assert len(raw) == 43
@@ -133,6 +134,7 @@ def test_an_anonymous_comment_makes_no_secret(env: dict[str, str]) -> None:
 
 
 @respx.mock
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_a_secret_other_users_can_read_is_refused(env: dict[str, str]) -> None:
     path = _secret_file(env)
     path.write_text(base64.urlsafe_b64encode(bytes(32)).decode().rstrip("=") + "\n")
@@ -210,6 +212,7 @@ def test_comments_mark_the_ones_that_mention_you(env: dict[str, str]) -> None:
 
 
 @respx.mock
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
 def test_a_secret_that_cannot_be_written_says_where(env: dict[str, str]) -> None:
     folder = _secret_file(env).parent
     os.chmod(folder, 0o500)
