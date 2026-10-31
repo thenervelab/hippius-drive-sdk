@@ -990,8 +990,10 @@ def _unwritable(paths: Iterable[str], prefix: str) -> dict[str, str]:
     for path, group in _local_clashes(paths).items():
         others = ", ".join(p for p in group if p != path)
         refused.setdefault(path, f"is one local file with {others}; mv one to download it")
-    for path, child in _file_dir_clashes(paths).items():
-        refused.setdefault(path, f"is a local directory for {child}; mv one to download it")
+    # Only files that will be written make a local directory.
+    written = [path for path in paths if path not in refused]
+    for path, child in _file_dir_clashes(written).items():
+        refused[path] = f"is a local directory for {child}; mv one to download it"
     return refused
 
 

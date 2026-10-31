@@ -2394,6 +2394,40 @@ def test_get_recursive_refuses_a_file_that_is_also_a_directory(
     assert "downloaded 2, refused 1" in result.output
 
 
+@respx.mock
+def test_get_recursive_keeps_a_file_whose_directory_is_never_written(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    # "x/b" and "X/b" clash wherever the disk folds case; on Linux, "x/b" is
+    # written and so "x" is refused.
+    files = {"x": b"file", "x/b": b"one", "X/b": b"two"}
+    _state_with([_row(path) for path in files])
+    _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    if sys.platform == "linux":
+        assert "refused   x is a local directory for x/b" in result.stderr
+    else:
+        assert (dest / "x").read_bytes() == b"file"
+        assert "downloaded 1, refused 2" in result.output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows refuses these names")
+@respx.mock
+def test_get_recursive_writes_windows_reserved_names_elsewhere(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    files = {"a:b": b"colon", "con.txt": b"device"}
+    _state_with([_row(path) for path in files])
+    _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 0, result.output
+    assert (dest / "a:b").read_bytes() == b"colon"
+    assert (dest / "con.txt").read_bytes() == b"device"
+
+
 @pytest.mark.skipif(sys.platform == "linux", reason="Linux disks are case-sensitive")
 @respx.mock
 def test_get_recursive_refuses_a_file_that_is_a_directory_in_another_case(
