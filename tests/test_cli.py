@@ -2157,6 +2157,76 @@ def test_get_recursive_writes_files_under_dest_with_relative_paths(
     assert "downloaded 2" in result.output
 
 
+def _downloads(files: dict[str, bytes]) -> dict[str, respx.Route]:
+    """A download route per remote path, each serving its own content."""
+    routes = {}
+    for path, body in files.items():
+        file_id = hashes.path_hash(path).hex()
+        routes[path] = respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
+            return_value=httpx.Response(200, content=file_cipher.encrypt_bytes(body, key()))
+        )
+    return routes
+
+
+@pytest.mark.skipif(sys.platform == "linux", reason="Linux disks are case-sensitive")
+@respx.mock
+def test_get_recursive_refuses_names_that_differ_only_in_case(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    files = {
+        "docs/A.txt": b"upper",
+        "docs/a.txt": b"lower",
+        "docs/Sub/c.txt": b"one",
+        "docs/sub/c.txt": b"two",
+        "docs/sub/d.txt": b"delta",
+        "docs/b.txt": b"bravo",
+    }
+    _state_with([_row(path) for path in files])
+    routes = _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "docs", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    assert "docs/A.txt is one local file with docs/a.txt" in result.stderr
+    assert "docs/a.txt is one local file with docs/A.txt" in result.stderr
+    assert "docs/sub/c.txt is one local file with docs/Sub/c.txt" in result.stderr
+    refused = ["docs/A.txt", "docs/a.txt", "docs/Sub/c.txt", "docs/sub/c.txt"]
+    assert all(routes[path].calls == [] for path in refused)
+    # A directory that differs only in case is one local directory: only
+    # files that clash inside it are refused.
+    assert (dest / "sub" / "d.txt").read_bytes() == b"delta"
+    assert (dest / "b.txt").read_bytes() == b"bravo"
+    assert "downloaded 2, refused 4" in result.output
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows drops trailing dots and spaces")
+@respx.mock
+def test_get_recursive_refuses_names_windows_strips_to_one(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([_row("x"), _row("x."), _row("dir /y"), _row("dir/y")])
+    routes = _downloads({"x": b"1", "x.": b"2", "dir /y": b"3", "dir/y": b"4"})
+    result = run(["get", "-r", "", str(tmp_path / "out")], env)
+    assert result.exit_code == 3, result.output
+    assert all(route.calls == [] for route in routes.values())
+    assert "x. is one local file with x;" in result.stderr
+    assert "dir /y is one local file with dir/y;" in result.stderr
+    assert "refused 4" in result.output
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="macOS and Windows disks fold case")
+@respx.mock
+def test_get_recursive_writes_names_that_differ_only_in_case_on_linux(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([_row("A.txt"), _row("a.txt")])
+    _downloads({"A.txt": b"upper", "a.txt": b"lower"})
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 0, result.output
+    assert (dest / "A.txt").read_bytes() == b"upper"
+    assert (dest / "a.txt").read_bytes() == b"lower"
+
+
 @needs_symlinks
 @respx.mock
 def test_get_recursive_refuses_a_path_that_leaves_dest(env: dict[str, str], tmp_path: Path) -> None:
@@ -2333,16 +2403,109 @@ def test_a_tree_prefix_of_slash_is_refused(env: dict[str, str], tmp_path: Path) 
 def test_get_recursive_reports_a_file_that_cannot_be_written(
     env: dict[str, str], tmp_path: Path
 ) -> None:
-    _state_with([_row("a"), _row("a/b")])
-    for path in ["a", "a/b"]:
-        file_id = hashes.path_hash(path).hex()
-        respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
-            return_value=httpx.Response(200, content=file_cipher.encrypt_bytes(b"x", key()))
-        )
-    result = run(["get", "-r", "", str(tmp_path / "out")], env)
+    _state_with([_row("a")])
+    _downloads({"a": b"x"})
+    dest = tmp_path / "out"
+    (dest / "a").mkdir(parents=True)
+    result = run(["get", "-r", "", str(dest)], env)
     assert result.exit_code == 1
     assert "cannot write" in result.output
     assert "Traceback" not in result.output
+
+
+@respx.mock
+def test_get_recursive_refuses_a_file_that_is_also_a_directory(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    files = {"a": b"file", "a/b": b"bravo", "c": b"charlie"}
+    _state_with([_row(path) for path in files])
+    routes = _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    assert "refused   a is a local directory for a/b" in result.stderr
+    assert routes["a"].calls == []
+    assert (dest / "a" / "b").read_bytes() == b"bravo"
+    assert (dest / "c").read_bytes() == b"charlie"
+    assert "downloaded 2, refused 1" in result.output
+
+
+@respx.mock
+def test_get_recursive_keeps_a_file_whose_directory_is_never_written(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    # "x/b" and "X/b" clash wherever the disk folds case; on Linux, "x/b" is
+    # written and so "x" is refused.
+    files = {"x": b"file", "x/b": b"one", "X/b": b"two"}
+    _state_with([_row(path) for path in files])
+    _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    if sys.platform == "linux":
+        assert "refused   x is a local directory for x/b" in result.stderr
+    else:
+        assert (dest / "x").read_bytes() == b"file"
+        assert "downloaded 1, refused 2" in result.output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows refuses these names")
+@respx.mock
+def test_get_recursive_writes_windows_reserved_names_elsewhere(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    files = {"a:b": b"colon", "con.txt": b"device"}
+    _state_with([_row(path) for path in files])
+    _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 0, result.output
+    assert (dest / "a:b").read_bytes() == b"colon"
+    assert (dest / "con.txt").read_bytes() == b"device"
+
+
+@pytest.mark.skipif(sys.platform == "linux", reason="Linux disks are case-sensitive")
+@respx.mock
+def test_get_recursive_refuses_a_file_that_is_a_directory_in_another_case(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    files = {"A": b"file", "a/b": b"bravo"}
+    _state_with([_row(path) for path in files])
+    routes = _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    assert "refused   A is a local directory for a/b" in result.stderr
+    assert routes["A"].calls == []
+    assert (dest / "a" / "b").read_bytes() == b"bravo"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows forbids these names")
+@respx.mock
+def test_get_recursive_refuses_names_windows_cannot_hold(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    files = {
+        "aux/a:b": b"stream",
+        "aux/q?.txt": b"query",
+        "aux/con.txt": b"device",
+        "aux/LPT1/x": b"device dir",
+        "aux/COM\u00b9": b"superscript",
+        "aux/.../y": b"dots",
+        "aux/ok.txt": b"fine",
+    }
+    # The prefix is a device name too, but it is not part of any local name.
+    _state_with([_row(path) for path in files])
+    routes = _downloads(files)
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "aux", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    assert "aux/a:b has ':', which a Windows file name cannot hold" in result.stderr
+    assert "aux/con.txt has 'con.txt', a reserved Windows device name" in result.stderr
+    assert "aux/.../y has '...', which Windows reads as no name" in result.stderr
+    assert all(routes[path].calls == [] for path in files if path != "aux/ok.txt")
+    assert [p.name for p in dest.iterdir()] == ["ok.txt"]
+    assert "downloaded 1, refused 6" in result.output
 
 
 def test_get_recursive_refuses_a_file_as_dest(env: dict[str, str], tmp_path: Path) -> None:

@@ -191,7 +191,18 @@ name is reported the same way. A failed delete exits 1 after the summary line.
 `get -r` writes each listed file under the remote directory to the local
 directory, replacing local files of the same name, and refuses a path that
 would land outside it. Files with no stored plaintext path cannot be placed
-and are not downloaded; empty directories are not recreated.
+and are not downloaded; empty directories are not recreated. Remote names are
+case-sensitive, but the default macOS and Windows disks are not, and Windows
+also drops trailing dots and spaces: remote files that would land on one local
+file (`A.txt` and `a.txt`, `x.` and `x`) are reported on stderr and none of
+them is written. The other files are, and the command exits 3; `mv` one of
+them remotely and rerun. The check follows the operating system, not the disk:
+a case-sensitive macOS volume is refused all the same, and a case-insensitive
+disk mounted on Linux is not checked. The same report and exit 3 cover a
+remote file whose name is also a directory of other files (`a` next to `a/b`;
+only `a` is refused), and, on Windows, a name Windows cannot hold: one with
+`<>:"|?*`, a segment of only dots and spaces, or a device name such as `CON`
+or `aux.txt`.
 
 `ls` shows directories first with recursive byte totals, then files. With no
 paging flags it lists the whole directory, fetching as many pages as that

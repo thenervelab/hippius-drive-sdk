@@ -13,7 +13,7 @@ import stat
 import sys
 import tempfile
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -990,15 +990,132 @@ def _get_tree(client: Client, target: str, dest: Path) -> None:
     if not listed:
         raise click.ClickException(f"no files under {prefix or 'the folder root'}")
     root = dest.resolve()
+    refused = _unwritable(listed, prefix)
+    for path in sorted(refused):
+        click.echo(f"refused   {path} {refused[path]}", err=True)
     for path, entry in sorted(listed.items()):
-        out = _inside(root, path[len(prefix) + 1 :] if prefix else path)
+        if path in refused:
+            continue
+        out = _inside(root, _below(prefix, path))
         try:
             client.files.get(entry.file_id, out)
         except OSError as exc:
-            # A remote "a" next to "a/b", or a local directory where a file goes.
+            # A local directory where a file goes, or a disk that refuses a
+            # name the checks above let through.
             raise click.ClickException(f"cannot write {out}: {exc.strerror}") from exc
         click.echo(f"wrote     {out}")
-    click.echo(f"downloaded {len(listed)}")
+    click.echo(f"downloaded {len(listed) - len(refused)}, refused {len(refused)}")
+    if refused:
+        raise ConflictExit(f"{len(refused)} files were not downloaded; see the lines above")
+
+
+def _below(prefix: str, path: str) -> str:
+    """``path`` relative to the directory ``prefix`` ("" for the root)."""
+    return path[len(prefix) + 1 :] if prefix else path
+
+
+def _unwritable(paths: Iterable[str], prefix: str) -> dict[str, str]:
+    """Each listed path ``get -r`` must not write on this platform, with the reason.
+
+    Checked before any download, so a bad name is reported per file and the
+    rest still download, instead of stopping the command partway with exit 1.
+    A path refused for one reason is not reported again for another.
+    """
+    paths = sorted(paths)
+    refused: dict[str, str] = {}
+    for path in paths:
+        reason = _windows_unsafe(_below(prefix, path))
+        if reason is not None:
+            refused[path] = f"{reason}; mv it to download it"
+    for path, group in _local_clashes(paths).items():
+        others = ", ".join(p for p in group if p != path)
+        refused.setdefault(path, f"is one local file with {others}; mv one to download it")
+    # Only files that will be written make a local directory.
+    written = [path for path in paths if path not in refused]
+    for path, child in _file_dir_clashes(written).items():
+        refused[path] = f"is a local directory for {child}; mv one to download it"
+    return refused
+
+
+# Reserved device names: a file named one of these, with any extension, opens
+# the device. Source: "Naming Files, Paths, and Namespaces" (Win32 docs,
+# learn.microsoft.com/windows/win32/fileio/naming-a-file), which also lists
+# the superscript-digit forms.
+_WINDOWS_RESERVED = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"{port}{n}" for port in ("COM", "LPT") for n in "0123456789\u00b9\u00b2\u00b3"]
+)
+# Characters the same page forbids in a name. ``\`` and control characters
+# never reach here: the server's path validator refuses them.
+_WINDOWS_FORBIDDEN = frozenset('<>:"|?*')
+
+
+def _windows_unsafe(relative: str) -> str | None:
+    """Why ``relative`` cannot be written under its own name on Windows, or None.
+
+    A colon is the worst case: ``a:b`` opens the alternate data stream ``b``
+    of the file ``a``, so the content is hidden and ``a`` may be replaced.
+    """
+    if sys.platform != "win32":
+        return None
+    for segment in relative.split("/"):
+        forbidden = "".join(sorted(_WINDOWS_FORBIDDEN.intersection(segment)))
+        if forbidden:
+            return f"has {forbidden!r}, which a Windows file name cannot hold"
+        if not segment.rstrip(". "):
+            return f"has {segment!r}, which Windows reads as no name"
+        if segment.split(".")[0].rstrip(" ").upper() in _WINDOWS_RESERVED:
+            return f"has {segment!r}, a reserved Windows device name"
+    return None
+
+
+def _file_dir_clashes(paths: Iterable[str]) -> dict[str, str]:
+    """Map each file whose local name is also a directory of another file to one such file.
+
+    Remote ``a`` next to ``a/b`` (or ``A`` next to ``a/b`` where the disk folds
+    case) cannot both exist locally. Only the file is refused: the directory
+    may hold many files, and the refusal names the clash so nothing is lost
+    silently.
+    """
+    paths = list(paths)
+    dirs: dict[str, str] = {}
+    for path in paths:
+        segments = path.split("/")
+        for depth in range(1, len(segments)):
+            dirs.setdefault(_local_name("/".join(segments[:depth])), path)
+    return {path: dirs[_local_name(path)] for path in paths if _local_name(path) in dirs}
+
+
+def _local_clashes(paths: Iterable[str]) -> dict[str, list[str]]:
+    """Map each remote path that shares a local file with another to all paths sharing it.
+
+    Remote paths are case-sensitive, so ``A.txt`` and ``a.txt`` can both
+    exist. The default macOS and Windows disks fold case, and Windows also
+    drops trailing dots and spaces (``x.`` is ``x``), so writing both would
+    leave one file holding whichever came last. None of a clashing group is
+    written: picking one would be a silent guess. ``mv`` on one of the
+    remote files fixes it.
+
+    The platform decides, not the destination disk: probing it would mean a
+    test write. So a case-sensitive macOS volume gets a refusal it did not
+    need, and a case-folding disk mounted on Linux gets no check.
+    ``casefold`` also folds a little more than APFS or NTFS (``ß`` and
+    ``ss``); that errs toward a refusal rather than a lost file. APFS also
+    ignores Unicode normalisation, but the listing keys are NFC already.
+    """
+    groups: dict[str, list[str]] = {}
+    for path in sorted(paths):
+        groups.setdefault(_local_name(path), []).append(path)
+    return {path: group for group in groups.values() if len(group) > 1 for path in group}
+
+
+def _local_name(path: str) -> str:
+    """``path`` as the default disk of this platform compares names."""
+    if sys.platform == "win32":
+        path = "/".join(part.rstrip(". ") for part in path.split("/"))
+    if sys.platform in ("darwin", "win32"):
+        return path.casefold()
+    return path
 
 
 def _inside(root: Path, relative: str) -> Path:
@@ -1030,7 +1147,11 @@ def get(obj: Context, target: str, dest: Path, recursive: bool) -> None:
 
     With -r, every listed file under the directory TARGET is written to
     DEST/<path below TARGET>, replacing local files of the same name. Empty
-    directories are not recreated. The first error stops the download.
+    directories are not recreated. Remote files whose names this disk treats
+    as one (A.txt and a.txt on macOS and Windows), a file that is also a
+    directory (a next to a/b), and on Windows a name it cannot hold (a:b,
+    CON) are reported and not written; the rest are, and the command exits
+    3. Any other error stops the download.
     """
     if recursive:
         with obj.client() as client:
