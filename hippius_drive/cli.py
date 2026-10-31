@@ -653,9 +653,9 @@ def sync(obj: Context, local: Path, remote: str, delete: bool) -> None:
 
     A file someone writes or edits between the listing and the write is left
     alone: it is reported, the rest continue, and the command exits 3.
-    Symlinks are skipped (and with --delete, the remote files at their paths
-    are kept), empty directories are created, and any other error stops at
-    that file with exit 1.
+    Symlinks and junctions are skipped (and with --delete, the remote files
+    at their paths are kept), empty directories are created, and any other
+    error stops at that file with exit 1.
     """
     prefix = _tree_prefix(remote)
     tree = _walk_tree(local, prefix)
@@ -737,10 +737,11 @@ def _raise(exc: OSError) -> None:
 def _walk_tree(root: Path, prefix: str) -> _Tree:
     """List what uploading ``root`` to ``prefix`` means; refuse names that cannot be stored.
 
-    Symlinks are skipped rather than followed: following one can leave the
-    tree, upload a file twice under two names, or loop. A directory whose only
-    content was skipped counts as empty. Only directories with nothing below
-    them are listed as empty: the server shows ``a`` once ``a/b`` exists.
+    Symlinks and Windows junctions are skipped rather than followed:
+    following one can leave the tree, upload a file twice under two names, or
+    loop. A directory whose only content was skipped counts as empty. Only
+    directories with nothing below them are listed as empty: the server shows
+    ``a`` once ``a/b`` exists.
     """
     tree = _Tree(files=[], empty_dirs=[], skipped=[])
     # os.walk swallows a directory it cannot list unless told otherwise.
@@ -758,8 +759,28 @@ def _walk_tree(root: Path, prefix: str) -> _Tree:
 
 
 def _is_plain(path: Path) -> bool:
-    """True for a real directory or regular file, never for a symlink to one."""
-    return not path.is_symlink() and (path.is_dir() or path.is_file())
+    """True for a real directory or regular file, never for a symlink or junction to one."""
+    if path.is_symlink() or _is_junction(path):
+        return False
+    return path.is_dir() or path.is_file()
+
+
+def _is_junction(path: Path) -> bool:
+    """True for a Windows directory junction, which ``is_symlink`` does not report.
+
+    A junction leads out of the tree or into a loop exactly as a symlink does,
+    and needs no privilege to create. This is the check ``os.path.isjunction``
+    makes on Python 3.12+, written out for 3.10 and 3.11.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        tag = os.lstat(path).st_reparse_tag
+    except OSError:
+        # Gone since the walk listed it: is_dir and is_file then say False too,
+        # so it is skipped, as is_symlink would have it.
+        return False
+    return tag == stat.IO_REPARSE_TAG_MOUNT_POINT
 
 
 def _target(root: Path, prefix: str, path: Path) -> str:
