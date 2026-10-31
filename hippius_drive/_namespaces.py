@@ -15,9 +15,9 @@ from typing import Any, NoReturn
 
 import httpx
 
-from hippius_drive import _links, _ops, errors
+from hippius_drive import _links, _ops, _share_insights, errors
 from hippius_drive._upload import SPOOL_MAX, PlaintextSource, reader_over
-from hippius_drive._wire import parse_envelope
+from hippius_drive._wire import check_comment_id, parse_envelope
 from hippius_drive.crypto import file_cipher, invite_link
 from hippius_drive.crypto.sharing import ShareSecret
 from hippius_drive.models import (
@@ -35,6 +35,11 @@ from hippius_drive.models import (
     MintedShare,
     OpenedShare,
     OwnerWrapsResult,
+    PostedComment,
+    ShareComment,
+    ShareInsights,
+    ShareReactions,
+    ShareSettings,
     ShareSummary,
     ShareTtl,
 )
@@ -194,6 +199,199 @@ class ShareOps:
             data = _decrypt(response, key)
         filename = _links.decode_share_filename(meta.filename_ct, meta.filename_nonce, key)
         return OpenedShare(filename, meta.mime_type, data, meta.expires_at)
+
+    def recover_url(
+        self,
+        token: str,
+        master_mnemonic: str,
+        *,
+        account_ss58: str | None = None,
+        console_base_url: str = _links.DEFAULT_CONSOLE,
+    ) -> str:
+        """Rebuild one of this account's file-share URLs from its owner wrap.
+
+        The console stores an owner wrap with every link it mints; a link
+        minted by :meth:`create` has one only after :meth:`put_owner_wraps`.
+        A ``#p=`` link comes back as ``#p=`` and still needs its password.
+
+        Args:
+            token: The plaintext share token, from :meth:`list`.
+            master_mnemonic: The minter's master phrase.
+            account_ss58: The account the token resolves to. Required when this
+                client is a member of someone else's drive.
+            console_base_url: Origin for the rebuilt URL.
+
+        Returns:
+            The recipient URL. It is the key: do not log it.
+        """
+        account = _links.wrap_account(self._client.identity, account_ss58)
+        return _share_insights.owner_share_url(
+            self.list(),
+            token,
+            master_mnemonic,
+            account_ss58=account,
+            console_base_url=console_base_url,
+        )
+
+    def update_settings(
+        self,
+        token: str,
+        *,
+        insights: bool | None = None,
+        comments: bool | None = None,
+        reactions: bool | None = None,
+    ) -> ShareSettings:
+        """Turn a file share's insights, comments, or reactions on or off.
+
+        The current switches are on each :meth:`list` row (``settings``).
+        Turning one on can raise :class:`~hippius_drive.errors.PaidPlanRequired`
+        on the Free Drive plan, and ``ServerError`` ``billing_unavailable``
+        when the server cannot read the plan; retry that one later.
+
+        Args:
+            token: The plaintext share token.
+            insights: Record views.
+            comments: Let viewers post comments.
+            reactions: Let viewers react.
+
+        Returns:
+            All three switches as they now stand.
+
+        Raises:
+            ValueError: If no switch is named, or the server has ``share_insights`` off.
+        """
+        body = _share_insights.settings_body(
+            insights=insights, comments=comments, reactions=reactions
+        )
+        _share_insights.require_insights(_links.capabilities_or_disabled(self._client.run))
+        return self._client.run(_ops.update_share_settings(token, body))
+
+    def insights(self, token: str) -> ShareInsights:
+        """Read a file share's views and watch time. Owner only.
+
+        Viewer names stay sealed; open them with :meth:`viewer_names`.
+
+        Args:
+            token: The plaintext share token.
+
+        Returns:
+            The free-plan counts, or the paid-plan detail.
+
+        Raises:
+            ValueError: If the server has ``share_insights`` off.
+        """
+        _share_insights.require_insights(_links.capabilities_or_disabled(self._client.run))
+        return self._client.run(_ops.share_insights(token))
+
+    def viewer_names(
+        self, insights: ShareInsights, share_url: str, *, password: str | None = None
+    ) -> dict[str, str]:
+        """Decrypt the viewer names in :meth:`insights` with the link's key. No request.
+
+        Args:
+            insights: From :meth:`insights` on the same share.
+            share_url: The share's recipient URL; its fragment is the key.
+            password: Required when the URL is a ``#p=`` link.
+
+        Returns:
+            Names by ``viewer_id``. A viewer without a name, or whose name
+            does not open, is absent.
+        """
+        token, key = _share_insights.link_key(share_url, password)
+        return _share_insights.viewer_names(insights, token, key)
+
+    def comments(self, share_url: str, *, password: str | None = None) -> Sequence[ShareComment]:
+        """Read and decrypt every comment on a file share, oldest first.
+
+        Readable by anyone with the link, whatever the ``comments`` switch.
+        A comment that does not open under the link's key comes back with
+        ``text=None`` rather than failing the whole listing.
+
+        Args:
+            share_url: The recipient URL; its fragment is the key.
+            password: Required when the URL is a ``#p=`` link.
+
+        Returns:
+            Comments and replies; group replies by ``parent_id``.
+
+        Raises:
+            ValueError: If the server has ``share_comments`` off.
+        """
+        token, key = _share_insights.link_key(share_url, password)
+        _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
+        found: list[ShareComment] = []
+        seen: set[str] = set()
+        after: str | None = None
+        while True:
+            page = self._client.run(_ops.share_comments(token, after))
+            found.extend(_share_insights.open_rows(page.comments, token, key))
+            after = _share_insights.next_cursor(page, seen)
+            if after is None:
+                return _share_insights.mark_claimed_names(found)
+
+    def post_comment(
+        self,
+        share_url: str,
+        text: str,
+        *,
+        password: str | None = None,
+        parent_id: str | None = None,
+        at_ms: int | None = None,
+    ) -> PostedComment:
+        """Post an anonymous comment, encrypted under the link's key.
+
+        Never retried: a lost response could otherwise post it twice. The
+        owner turning comments off is ``Forbidden`` ``comments-off``.
+
+        Args:
+            share_url: The recipient URL; its fragment is the key.
+            text: Up to 2,000 characters.
+            password: Required when the URL is a ``#p=`` link.
+            parent_id: Reply to this top-level comment.
+            at_ms: The moment of the video the comment points at. Not on a reply.
+
+        Returns:
+            The new comment's id.
+
+        Raises:
+            ValueError: For bad input, or a server without the needed capability.
+        """
+        token, key = _share_insights.link_key(share_url, password)
+        body = _share_insights.comment_body(token, key, text, parent_id=parent_id, at_ms=at_ms)
+        caps = _links.capabilities_or_disabled(self._client.run)
+        _share_insights.require_comments(caps)
+        _share_insights.require_replies(caps, parent_id)
+        return self._client.run(_ops.post_share_comment(token, body))
+
+    def delete_comment(self, token: str, comment_id: str) -> None:
+        """Delete a comment: any on this account's link, or this account's own.
+
+        A timeout or 502 is retried; if the first attempt had already deleted
+        the comment, the retry answers ``NotFound``.
+
+        Args:
+            token: The plaintext share token.
+            comment_id: The comment's ``id``.
+
+        Raises:
+            ValueError: If the id is not a comment id, or the server has
+                ``share_comments`` off.
+        """
+        check_comment_id(comment_id)
+        _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
+        self._client.run(_ops.delete_share_comment(token, comment_id))
+
+    def reactions(self, token: str) -> ShareReactions:
+        """Read a file share's reaction counts and this account's own.
+
+        Args:
+            token: The plaintext share token.
+
+        Raises:
+            ValueError: If the server has ``share_comments`` off.
+        """
+        _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
+        return self._client.run(_ops.share_reactions(token))
 
 
 class FolderShareOps:
@@ -591,6 +789,100 @@ class AsyncShareOps:
             data = await _decrypt_async(response, key)
         filename = _links.decode_share_filename(meta.filename_ct, meta.filename_nonce, key)
         return OpenedShare(filename, meta.mime_type, data, meta.expires_at)
+
+    async def recover_url(
+        self,
+        token: str,
+        master_mnemonic: str,
+        *,
+        account_ss58: str | None = None,
+        console_base_url: str = _links.DEFAULT_CONSOLE,
+    ) -> str:
+        """Async twin of :meth:`ShareOps.recover_url`."""
+        account = _links.wrap_account(self._client.identity, account_ss58)
+        return _share_insights.owner_share_url(
+            await self.list(),
+            token,
+            master_mnemonic,
+            account_ss58=account,
+            console_base_url=console_base_url,
+        )
+
+    async def update_settings(
+        self,
+        token: str,
+        *,
+        insights: bool | None = None,
+        comments: bool | None = None,
+        reactions: bool | None = None,
+    ) -> ShareSettings:
+        """Async twin of :meth:`ShareOps.update_settings`."""
+        body = _share_insights.settings_body(
+            insights=insights, comments=comments, reactions=reactions
+        )
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_insights(caps)
+        return await self._client.run(_ops.update_share_settings(token, body))
+
+    async def insights(self, token: str) -> ShareInsights:
+        """Async twin of :meth:`ShareOps.insights`."""
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_insights(caps)
+        return await self._client.run(_ops.share_insights(token))
+
+    def viewer_names(
+        self, insights: ShareInsights, share_url: str, *, password: str | None = None
+    ) -> dict[str, str]:
+        """Same as :meth:`ShareOps.viewer_names`; it makes no request, so it is not async."""
+        token, key = _share_insights.link_key(share_url, password)
+        return _share_insights.viewer_names(insights, token, key)
+
+    async def comments(
+        self, share_url: str, *, password: str | None = None
+    ) -> Sequence[ShareComment]:
+        """Async twin of :meth:`ShareOps.comments`."""
+        token, key = _share_insights.link_key(share_url, password)
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_comments(caps)
+        found: list[ShareComment] = []
+        seen: set[str] = set()
+        after: str | None = None
+        while True:
+            page = await self._client.run(_ops.share_comments(token, after))
+            found.extend(_share_insights.open_rows(page.comments, token, key))
+            after = _share_insights.next_cursor(page, seen)
+            if after is None:
+                return _share_insights.mark_claimed_names(found)
+
+    async def post_comment(
+        self,
+        share_url: str,
+        text: str,
+        *,
+        password: str | None = None,
+        parent_id: str | None = None,
+        at_ms: int | None = None,
+    ) -> PostedComment:
+        """Async twin of :meth:`ShareOps.post_comment`."""
+        token, key = _share_insights.link_key(share_url, password)
+        body = _share_insights.comment_body(token, key, text, parent_id=parent_id, at_ms=at_ms)
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_comments(caps)
+        _share_insights.require_replies(caps, parent_id)
+        return await self._client.run(_ops.post_share_comment(token, body))
+
+    async def delete_comment(self, token: str, comment_id: str) -> None:
+        """Async twin of :meth:`ShareOps.delete_comment`."""
+        check_comment_id(comment_id)
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_comments(caps)
+        await self._client.run(_ops.delete_share_comment(token, comment_id))
+
+    async def reactions(self, token: str) -> ShareReactions:
+        """Async twin of :meth:`ShareOps.reactions`."""
+        caps = await _links.capabilities_or_disabled_async(self._client.run)
+        _share_insights.require_comments(caps)
+        return await self._client.run(_ops.share_reactions(token))
 
 
 class AsyncFolderShareOps:

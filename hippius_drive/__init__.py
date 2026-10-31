@@ -18,6 +18,7 @@ from hippius_drive.errors import InvalidRequest as InvalidRequest
 from hippius_drive.errors import InvalidResponse as InvalidResponse
 from hippius_drive.errors import MemberLimitReached as MemberLimitReached
 from hippius_drive.errors import NotFound as NotFound
+from hippius_drive.errors import PaidPlanRequired as PaidPlanRequired
 from hippius_drive.errors import PayloadTooLarge as PayloadTooLarge
 from hippius_drive.errors import QuotaExceeded as QuotaExceeded
 from hippius_drive.errors import RateLimited as RateLimited
@@ -30,8 +31,13 @@ from hippius_drive.models import BrowseOptions as BrowseOptions
 from hippius_drive.models import CreatedInvite as CreatedInvite
 from hippius_drive.models import CreatedShare as CreatedShare
 from hippius_drive.models import DriveMembership as DriveMembership
+from hippius_drive.models import PostedComment as PostedComment
 from hippius_drive.models import RenameSpec as RenameSpec
 from hippius_drive.models import SearchFilters as SearchFilters
+from hippius_drive.models import ShareComment as ShareComment
+from hippius_drive.models import ShareInsights as ShareInsights
+from hippius_drive.models import ShareReactions as ShareReactions
+from hippius_drive.models import ShareSettings as ShareSettings
 from hippius_drive.models import ShareTtl as ShareTtl
 
 __all__ = [
@@ -56,12 +62,18 @@ __all__ = [
     "InviteSpec",
     "MemberLimitReached",
     "NotFound",
+    "PaidPlanRequired",
     "PayloadTooLarge",
+    "PostedComment",
     "QuotaExceeded",
     "RateLimited",
     "RenameSpec",
     "SearchFilters",
     "ServerError",
+    "ShareComment",
+    "ShareInsights",
+    "ShareReactions",
+    "ShareSettings",
     "ShareTtl",
     "TransportError",
     "Unauthorized",

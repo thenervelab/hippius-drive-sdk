@@ -262,6 +262,48 @@ A folder link without a password is `#s=`.
 File-share `ls` prints the plaintext token. Folder-share `ls` prints
 `token_hash`, because the listing does not contain the token.
 
+### Share link insights, comments and reactions
+
+```bash
+hippius-drive share settings TOKEN                        # insights / comments / reactions on or off
+hippius-drive share settings TOKEN --insights on --comments on --reactions off
+hippius-drive share insights TOKEN                        # views, viewers, watch time
+hippius-drive share comments TOKEN                        # your own share with an owner wrap
+hippius-drive share comments --url-file link.txt          # any share: the URL is the key
+HIPPIUS_SHARE_URL="$(cat link.txt)" hippius-drive share comments --json
+hippius-drive share comment-post "see 0:42" TOKEN --at-ms 42000
+hippius-drive share comment-post - TOKEN < comment.txt   # text from stdin
+hippius-drive share comment-post "agreed" TOKEN --reply-to 41
+hippius-drive share comment-rm TOKEN 41
+hippius-drive share reactions TOKEN
+```
+
+Comments and viewer names are encrypted under the link's key, so the commands
+that read or post them need the share URL. They take it from `--url-file`
+(an owner-only file, or `-` for stdin) or `HIPPIUS_SHARE_URL`, never from the
+command line. For your own share, `TOKEN` alone is enough when the share has an
+owner wrap (links minted in the console do; `share put` links do not): the URL
+is rebuilt from it with your recovery phrase. A `#p=` link's password comes
+from `HIPPIUS_SHARE_PASSWORD` only; there is no flag, because argv is visible
+to other processes. `insights` reads the numbers without the key and shows
+viewer names only when it has one; otherwise it says why they are hidden.
+
+Posted comments are anonymous. Reading is open to anyone with the link;
+posting needs a signed-in account and the owner's `comments` switch on.
+Comment text and names come from anyone with the link. Plain output prints a
+name as a quoted string, so it cannot pass for the `[owner]` badge the server
+vouches for, and adds ` (viewer)` after a name that claims to be the owner or
+Hippius, as the console does. Control characters, line separators and bidi
+controls become `?`; `--json` has the exact text.
+
+Switches start off. Turning one on needs a paid Drive plan: on the Free plan
+the server refuses with `403 paid_plan_required` and the command says to
+upgrade. `502 billing_unavailable` means the plan service did not answer;
+run it again later. Insights on the Free plan show the counts and list the
+rest as locked. Each command reads `GET /v1/capabilities` first; when
+`share_insights` or `share_comments` is off it stops with a message naming the
+flag instead of calling the feature's route.
+
 ## Shared drives
 
 ```bash

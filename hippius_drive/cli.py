@@ -24,7 +24,7 @@ from hippius_drive import FileShareSpec, FolderShareSpec, InviteSpec, __version_
 from hippius_drive import auth as api_auth
 from hippius_drive._config import Config
 from hippius_drive.client import Client
-from hippius_drive.crypto import hashes, kdf, mnemonic_store
+from hippius_drive.crypto import hashes, kdf, mnemonic_store, sharing
 from hippius_drive.identity import Identity
 from hippius_drive.models import (
     MAX_BATCH_DELETE,
@@ -35,6 +35,10 @@ from hippius_drive.models import (
     RemoteFileEntry,
     RenameSpec,
     SearchFilters,
+    ShareComment,
+    ShareInsights,
+    ShareSettings,
+    ShareSummary,
 )
 
 FILE_ID_HEX_LEN = 64
@@ -45,6 +49,12 @@ _CONSOLE = "https://console.hippius.com"
 
 ENV_INVITE_URL = "HIPPIUS_INVITE_URL"
 """Environment variable ``drives join`` reads the invite URL from."""
+
+ENV_SHARE_URL = "HIPPIUS_SHARE_URL"
+"""Environment variable the share comment and insights commands read a link from."""
+
+ENV_SHARE_PASSWORD = "HIPPIUS_SHARE_PASSWORD"  # noqa: S105 - a variable name, not a secret
+"""Environment variable holding a ``#p=`` link's password. There is no flag: argv is visible."""
 
 _DAY_SECONDS = 86_400
 """Seconds in a day, for ``invite put --days``."""
@@ -215,10 +225,19 @@ class DriveGroup(click.Group):
         try:
             return super().invoke(ctx)
         except errors.DriveError as exc:
-            raise click.ClickException(str(exc)) from exc
+            raise click.ClickException(_explain(exc)) from exc
         except ValueError as exc:
             # Bad relative path, missing revision_seq, over-cap batch.
             raise click.ClickException(str(exc)) from exc
+
+
+def _explain(exc: errors.DriveError) -> str:
+    """The error, plus what to do for the two plan refusals a user can act on."""
+    if isinstance(exc, errors.PaidPlanRequired):
+        return f"{exc}\nthis needs a paid Drive plan: upgrade in {_CONSOLE}, then run it again"
+    if isinstance(exc, errors.ServerError) and exc.code == "billing_unavailable":
+        return f"{exc}\nthe Drive plan service did not answer: try again in a minute"
+    return str(exc)
 
 
 @click.group(cls=DriveGroup, context_settings={"help_option_names": ["-h", "--help"]})
@@ -1306,6 +1325,151 @@ def share_rm(obj: Context, token: str) -> None:
     click.echo("revoked")
 
 
+_URL_FILE = click.option(
+    "--url-file",
+    type=click.Path(path_type=Path, allow_dash=True),
+    default=None,
+    help=f"Read the share URL from this owner-only file, or - for stdin. Or set {ENV_SHARE_URL}.",
+)
+_SWITCH = click.Choice(["on", "off"])
+
+
+@share.command("settings")
+@click.argument("token")
+@click.option("--insights", type=_SWITCH, default=None, help="Record views.")
+@click.option("--comments", type=_SWITCH, default=None, help="Let viewers comment.")
+@click.option("--reactions", type=_SWITCH, default=None, help="Let viewers react.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.pass_obj
+def share_settings(
+    obj: Context,
+    token: str,
+    insights: str | None,
+    comments: str | None,
+    reactions: str | None,
+    as_json: bool,
+) -> None:
+    """Show a file share's insights, comments and reactions switches, or change them.
+
+    Turning one on needs a paid Drive plan.
+    """
+    with obj.client() as client:
+        if insights is None and comments is None and reactions is None:
+            row = _own_share(client, token)
+            if row is None:
+                raise click.ClickException("this account has no file share with that token")
+            if row.settings is None:
+                raise click.ClickException("this server does not report link settings")
+            found = row.settings
+        else:
+            found = client.shares.update_settings(
+                token,
+                insights=_on(insights),
+                comments=_on(comments),
+                reactions=_on(reactions),
+            )
+    _print_settings(found, as_json)
+
+
+@share.command("insights")
+@click.argument("token")
+@_URL_FILE
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.pass_obj
+def share_insights(obj: Context, token: str, url_file: Path | None, as_json: bool) -> None:
+    """Show a file share's views and watch time.
+
+    The numbers need no key. Viewer names are encrypted under the link's key:
+    they are shown when the link is given with --url-file or HIPPIUS_SHARE_URL,
+    or when the share has an owner wrap (links minted in the console do).
+    """
+    with obj.client() as client:
+        found = client.shares.insights(token)
+        names, hidden = _viewer_names(obj, client, token, found, url_file)
+    if as_json:
+        data = found.model_dump(mode="json")
+        for viewer in data["viewers"]:
+            viewer["name"] = names.get(viewer["viewer_id"])
+        click.echo(json.dumps(data, indent=2))
+        return
+    _print_insights(found, names, hidden)
+
+
+@share.command("comments")
+@click.argument("token", required=False)
+@_URL_FILE
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.pass_obj
+def share_comments(obj: Context, token: str | None, url_file: Path | None, as_json: bool) -> None:
+    """List a file share's comments, decrypted with the link's key.
+
+    The link comes from --url-file or HIPPIUS_SHARE_URL; for your own share,
+    TOKEN alone works when the share has an owner wrap. A #p= link's password
+    comes from HIPPIUS_SHARE_PASSWORD.
+    """
+    with obj.client() as client:
+        link = _require_link(obj, client, token, url_file)
+        found = client.shares.comments(link, password=_link_password(link))
+    rows = [_comment_row(item) for item in found]
+    _emit(rows, as_json, _comment_line)
+
+
+@share.command("comment-post")
+@click.argument("text")
+@click.argument("token", required=False)
+@_URL_FILE
+@click.option("--reply-to", default=None, help="Id of the top-level comment to answer.")
+@click.option("--at-ms", type=int, default=None, help="Moment of the video, in milliseconds.")
+@click.pass_obj
+def share_comment_post(
+    obj: Context,
+    text: str,
+    token: str | None,
+    url_file: Path | None,
+    reply_to: str | None,
+    at_ms: int | None,
+) -> None:
+    """Post TEXT as an anonymous comment on a file share. Prints its id.
+
+    TEXT ``-`` reads the comment from stdin, so it stays out of shell history.
+    """
+    if text == "-":
+        text = sys.stdin.read()
+    with obj.client() as client:
+        link = _require_link(obj, client, token, url_file)
+        posted = client.shares.post_comment(
+            link, text, password=_link_password(link), parent_id=reply_to, at_ms=at_ms
+        )
+    click.echo(f"posted {posted.id}")
+
+
+@share.command("comment-rm")
+@click.argument("token")
+@click.argument("comment_id")
+@click.pass_obj
+def share_comment_rm(obj: Context, token: str, comment_id: str) -> None:
+    """Delete a comment: any on your own share, or your own on another."""
+    with obj.client() as client:
+        client.shares.delete_comment(token, comment_id)
+    click.echo("deleted")
+
+
+@share.command("reactions")
+@click.argument("token")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.pass_obj
+def share_reactions(obj: Context, token: str, as_json: bool) -> None:
+    """Show a file share's reaction counts. ``mine`` marks your own."""
+    with obj.client() as client:
+        found = client.shares.reactions(token)
+    mine = set(found.mine)
+    rows = [
+        {"emoji": emoji, "count": count, "mine": emoji in mine}
+        for emoji, count in found.counts.items()
+    ]
+    _emit(rows, as_json, _reaction_line)
+
+
 @main.group("folder-share")
 def folder_share() -> None:
     """Mint, list, and revoke folder-share links."""
@@ -1517,6 +1681,186 @@ def _print_drives(obj: Context, as_json: bool) -> None:
         memberships = client.drives.memberships(obj.master(), member_ss58=account)
     rows = [_drive_row(row) for row in memberships]
     _emit(rows, as_json, _drive_line)
+
+
+def _on(value: str | None) -> bool | None:
+    return None if value is None else value == "on"
+
+
+def _own_share(client: Client, token: str) -> ShareSummary | None:
+    for row in client.shares.list():
+        if row.share_token == token:
+            return row
+    return None
+
+
+def _link_given(url_file: Path | None) -> str | None:
+    """The share URL from --url-file or the environment; never both."""
+    from_env = os.environ.get(ENV_SHARE_URL, "").strip()
+    if url_file is not None and from_env:
+        raise click.ClickException(f"give the link once: --url-file or {ENV_SHARE_URL}")
+    if url_file is not None:
+        return _read_secret(url_file)
+    return from_env or None
+
+
+def _find_link(
+    obj: Context, client: Client, token: str | None, url_file: Path | None
+) -> str | None:
+    """The share URL: given, or rebuilt from your own share's owner wrap, or None."""
+    given = _link_given(url_file)
+    if given is not None:
+        if token is not None and sharing.parse_share_url(given).token != token:
+            raise click.ClickException("the link is for a different share than TOKEN")
+        return given
+    if token is None:
+        return None
+    row = _own_share(client, token)
+    if row is None or not row.owner_wrap:
+        return None
+    # recover_url lists the shares again; one more GET keeps the CLI on the
+    # public method instead of reopening the wrap here.
+    return client.shares.recover_url(token, obj.master())
+
+
+def _require_link(obj: Context, client: Client, token: str | None, url_file: Path | None) -> str:
+    link = _find_link(obj, client, token, url_file)
+    if link is None:
+        raise click.ClickException(
+            f"comments need the link's key: pass --url-file FILE or set {ENV_SHARE_URL} "
+            "(TOKEN alone works only for your own share with an owner wrap)"
+        )
+    return link
+
+
+def _link_password(link: str) -> str | None:
+    """A ``#p=`` link's password, from the environment only: never argv."""
+    password = os.environ.get(ENV_SHARE_PASSWORD) or None
+    if password is None and sharing.parse_share_url(link).secret.private:
+        raise click.ClickException(f"this is a password link: set {ENV_SHARE_PASSWORD}")
+    return password
+
+
+def _viewer_names(
+    obj: Context, client: Client, token: str, found: ShareInsights, url_file: Path | None
+) -> tuple[dict[str, str], str | None]:
+    """Viewer names by id, and why names are hidden when they are."""
+    if not any(viewer.name_ct for viewer in found.viewers):
+        return {}, None
+    link = _find_link(obj, client, token, url_file)
+    if link is None:
+        return {}, f"pass --url-file or set {ENV_SHARE_URL} to read them"
+    try:
+        password = _link_password(link)
+    except click.ClickException as exc:
+        # The numbers are already here; a missing password only hides names.
+        return {}, exc.message
+    return client.shares.viewer_names(found, link, password=password), None
+
+
+def _print_settings(found: ShareSettings, as_json: bool) -> None:
+    if as_json:
+        click.echo(found.model_dump_json(indent=2))
+        return
+    for name, value in found.model_dump().items():
+        click.echo(f"{name:<10} {'on' if value else 'off'}")
+
+
+def _print_insights(found: ShareInsights, names: dict[str, str], hidden: str | None) -> None:
+    click.echo(f"plan            {found.plan}")
+    click.echo(f"views           {found.total_views}")
+    click.echo(f"unique_viewers  {found.unique_viewers}")
+    if found.completion_rate is not None:
+        click.echo(f"completion      {found.completion_rate:.0%}")
+    if found.locked:
+        click.echo(f"locked          {', '.join(found.locked)} (paid Drive plan)")
+    for viewer in found.viewers:
+        name = names.get(viewer.viewer_id)
+        shown = _terminal_safe(json.dumps(name, ensure_ascii=False)) if name else "-"
+        seconds = viewer.watched_ms // 1000
+        click.echo(f"viewer  {viewer.viewer_id}  {viewer.visits} visits  {seconds}s  {shown}")
+    if hidden is not None:
+        click.echo(f"names are hidden: {hidden}")
+
+
+def _comment_row(item: ShareComment) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "parent_id": item.parent_id,
+        "at_ms": item.at_ms,
+        "created_at": item.created_at,
+        "name": item.name,
+        "name_claimed": item.name_claimed,
+        "text": item.text,
+        "anonymous": item.anonymous,
+        "mine": item.mine,
+        "owner": item.owner,
+        "blocked": item.blocked,
+        "deleted": item.deleted,
+    }
+
+
+def _comment_line(row: dict[str, Any]) -> str:
+    if row["deleted"]:
+        text = "(deleted)"
+    elif row["text"] is None:
+        text = "(does not open with this link's key)"
+    else:
+        text = _terminal_safe(row["text"])
+    when = f"{row['created_at'] or '-':<20}  {_moment(row['at_ms']):>8}"
+    return f"{row['id']:>6}  {when}  {_author(row)}: {text}"
+
+
+def _author(row: dict[str, Any]) -> str:
+    """Who posted, with the server-vouched owner badge where no name can reach it.
+
+    A name is whatever its poster sealed, so it is printed as a JSON string:
+    nothing in it can land outside the quotes and pass for ``[owner]``.
+    """
+    name = row["name"]
+    who = _terminal_safe(json.dumps(name, ensure_ascii=False)) if name else "anonymous"
+    if row["name_claimed"]:
+        who += " (viewer)"
+    if row["owner"]:
+        who = f"[owner] {who}"
+    if row["parent_id"]:
+        who = f"re {row['parent_id']}  {who}"
+    return who
+
+
+def _moment(at_ms: int | None) -> str:
+    """The video moment as the console's ``formatMoment``: m:ss, or h:mm:ss from an hour."""
+    if at_ms is None:
+        return "-"
+    hours, rest = divmod(at_ms // 1000, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02}:{seconds:02}"
+    return f"{minutes}:{seconds:02}"
+
+
+def _reaction_line(row: dict[str, Any]) -> str:
+    mine = "  (mine)" if row["mine"] else ""
+    return f"{row['emoji']}  {row['count']}{mine}"
+
+
+# Bidi embedding, override and isolate controls reorder the rest of the line.
+_BIDI_CONTROLS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+def _terminal_safe(value: str) -> str:
+    """Comment text and names come from anyone with the link: drop terminal controls.
+
+    Control characters, line and paragraph separators and bidi controls
+    become ``?``. Joiners and other format characters stay, so emoji
+    sequences and Persian or Indic text still read right.
+    """
+    flat = value.replace("\r\n", " ").replace("\n", " ")
+    return "".join("?" if _unsafe(char) else char for char in flat)
+
+
+def _unsafe(char: str) -> bool:
+    return char in _BIDI_CONTROLS or unicodedata.category(char) in ("Cc", "Zl", "Zp")
 
 
 def _share_row(item: Any) -> dict[str, Any]:
