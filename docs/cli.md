@@ -215,6 +215,13 @@ hippius-drive share comment-post - TOKEN < comment.txt   # text from stdin
 hippius-drive share comment-post "agreed" TOKEN --reply-to 41
 hippius-drive share comment-rm TOKEN 41
 hippius-drive share reactions TOKEN
+hippius-drive share react 👍 TOKEN                        # one of 👍 ❤️ 😂 😮 🎉 👏 🔥 🙌
+hippius-drive share react 🔥 TOKEN --at-ms 98000          # at a moment of the video
+hippius-drive share unreact 👍 TOKEN                      # also drops its moments
+hippius-drive share moments TOKEN                         # every reaction moment, by time
+hippius-drive share block TOKEN 41                        # stop the author of comment 41
+hippius-drive share unblock TOKEN 41
+hippius-drive share seen TOKEN                            # restart the "new" counts
 ```
 
 Comments and viewer names are encrypted under the link's key, so the commands
@@ -242,6 +249,22 @@ run it again later. Insights on the Free plan show the counts and list the
 rest as locked. Each command reads `GET /v1/capabilities` first; when
 `share_insights` or `share_comments` is off it stops with a message naming the
 flag instead of calling the feature's route.
+
+Reactions are per account: `react` again changes nothing, and `unreact`
+works even with reactions off or after a block. `react --at-ms` stores one
+more moment on every call and also adds the reaction; `unreact` takes the
+reaction and all its moments back. It is never retried, so a lost response
+does not store a moment twice. The moment commands need `share_reaction_moments`.
+
+`block` stops the author of a comment on your link from commenting and
+reacting there. The server never says who they are, and what they wrote
+stays until it is deleted. Unblock through a comment of theirs that is still
+on the link: once their last one is deleted, the block lasts as long as the
+link. A blocked account gets `403 blocked`.
+
+`seen` is what the console sends when you open a link's Insights: the
+`new_views` and `new_comments` counts in `share ls --json` start again from 0.
+`share insights` does not send it. It needs `share_listing_counts`.
 
 ## Shared drives
 

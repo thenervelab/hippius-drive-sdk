@@ -199,6 +199,12 @@ for comment in client.shares.comments(created.share_url):
 client.shares.post_comment(created.share_url, "see 0:42", at_ms=42_000)  # anonymous
 client.shares.delete_comment(token, "41")
 print(client.shares.reactions(token).counts)
+
+client.shares.react(token, "🔥")  # one of hippius_drive.REACTIONS
+client.shares.react_at(token, "🔥", 98_000)  # at a moment; each call adds one
+client.shares.unreact(token, "🔥")  # and its moments
+client.shares.block_author(token, "41")  # the author of comment 41, on this link
+client.shares.mark_insights_seen(token)  # restart the listing's "new" counts
 ```
 
 Comments and viewer names are encrypted in the console's format: AES-256-GCM
