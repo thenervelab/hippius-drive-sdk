@@ -1906,7 +1906,7 @@ def test_put_recursive_refuses_listed_files_and_uploads_the_rest(
     assert result.exit_code == 3
     assert "backup/a.txt already exists; pass --overwrite" in result.stderr
     assert set(_uploaded_paths(upload)) == {"backup/sub/b.txt", "backup/sub/deep/c.txt"}
-    assert "1 of 3 files were not uploaded" in result.output
+    assert "uploaded 2, replaced 0, unchanged 0, deleted 0, refused 1" in result.output
 
 
 @respx.mock
@@ -2033,19 +2033,32 @@ def test_sync_delete_removes_remote_files_missing_locally_under_the_prefix_only(
     env: dict[str, str], tmp_path: Path
 ) -> None:
     # get_state lists the whole folder; "m2/x" shares the "m" prefix as a string only.
-    _state_with([_row("m/a.txt", b"alpha"), _row("m/gone.txt"), _row("m2/x.txt"), _row("y.txt")])
+    _state_with(
+        [
+            _row("m/a.txt", b"alpha"),
+            _row("m/gone.txt", revision_id=[6] * 32),
+            _row("m2/x.txt"),
+            _row("y.txt"),
+        ]
+    )
+    gone = hashes.path_hash("m/gone.txt").hex()
+    deleted = [{"file_id": gone, "status": "deleted"}]
     delete = respx.post(f"{BASE}/delete_files").mock(
-        return_value=httpx.Response(200, json={"Success": {"errors": [], "files_deleted": 1}})
+        return_value=httpx.Response(200, json={"Success": {"deleted": deleted, "files_deleted": 1}})
     )
     src = tmp_path / "src"
     src.mkdir()
     (src / "a.txt").write_bytes(b"alpha")
     result = run(["sync", str(src), "m", "--delete"], env)
     assert result.exit_code == 0, result.output
-    gone = hashes.path_hash("m/gone.txt").hex()
-    assert json.loads(delete.calls.last.request.content)["file_ids"] == [gone]
-    assert f"deleted   {gone}" in result.output
+    body = json.loads(delete.calls.last.request.content)
+    assert body["file_ids"] == [gone]
+    assert body["expected_revision_ids"] == {gone: [6] * 32}
+    assert "deleted   m/gone.txt" in result.output
     assert "unchanged 1, deleted 1" in result.output
+
+
+GONE_ID = hashes.path_hash("gone.txt").hex()
 
 
 @respx.mock
@@ -2056,7 +2069,7 @@ def test_sync_delete_failure_exits_1(env: dict[str, str], tmp_path: Path) -> Non
             200,
             json={
                 "Success": {
-                    "errors": [{"file_id": "aa", "code": "db", "message": "x"}],
+                    "errors": [{"file_id": GONE_ID, "code": "db", "message": "x"}],
                     "files_deleted": 0,
                 }
             },
@@ -2065,7 +2078,8 @@ def test_sync_delete_failure_exits_1(env: dict[str, str], tmp_path: Path) -> Non
     (tmp_path / "src").mkdir()
     result = run(["sync", str(tmp_path / "src"), "", "--delete"], env)
     assert result.exit_code == 1
-    assert "deleted 0, 1 failed" in result.output
+    assert "failed    gone.txt  db: x" in result.stderr
+    assert "1 deletes failed" in result.output
 
 
 @respx.mock
@@ -2083,6 +2097,7 @@ def test_sync_that_loses_a_race_exits_3_and_finishes_the_rest(
     result = run(["sync", str(src), ""], env)
     assert result.exit_code == 3
     assert "a.txt changed since it was read" in result.stderr
+    assert "refused 1" in result.output
     assert upload.call_count == 2
 
 
@@ -2129,3 +2144,171 @@ def test_get_recursive_with_nothing_under_the_prefix_fails(
     result = run(["get", "-r", "docs", str(tmp_path / "out")], env)
     assert result.exit_code == 1
     assert "no files under docs" in result.output
+
+
+@respx.mock
+def test_sync_delete_leaves_a_file_edited_since_the_listing(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([_row("gone.txt")])
+    conflict = {"file_id": GONE_ID, "code": "conflict", "message": "revision moved"}
+    respx.post(f"{BASE}/delete_files").mock(
+        return_value=httpx.Response(200, json={"Success": {"errors": [conflict]}})
+    )
+    (tmp_path / "src").mkdir()
+    result = run(["sync", str(tmp_path / "src"), "", "--delete"], env)
+    assert result.exit_code == 3
+    assert "gone.txt changed since it was listed; not deleted" in result.stderr
+
+
+@needs_symlinks
+@respx.mock
+def test_sync_delete_keeps_remote_files_at_skipped_local_paths(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([_row("link.txt"), _row("linkdir/b.txt"), _row("gone.txt")])
+    delete = respx.post(f"{BASE}/delete_files").mock(
+        return_value=httpx.Response(200, json={"Success": {"files_deleted": 1}})
+    )
+    src = tmp_path / "src"
+    src.mkdir()
+    (tmp_path / "t.txt").write_bytes(b"t")
+    (src / "link.txt").symlink_to(tmp_path / "t.txt")
+    (src / "linkdir").symlink_to(tmp_path, target_is_directory=True)
+    result = run(["sync", str(src), "", "--delete"], env)
+    assert result.exit_code == 0, result.output
+    assert json.loads(delete.calls.last.request.content)["file_ids"] == [GONE_ID]
+
+
+@respx.mock
+def test_sync_does_not_replace_a_file_created_since_the_listing(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([])
+    upload = respx.post(f"{BASE}/upload").mock(return_value=_conflict([5] * 32))
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"alpha")
+    result = run(["sync", str(src), ""], env)
+    assert result.exit_code == 3
+    assert "a.txt was created since it was listed" in result.stderr
+    assert upload.call_count == 1
+
+
+@respx.mock
+def test_sync_places_a_row_with_no_stored_path_by_its_id(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([{**_row("a.txt", b"alpha"), "relative_path": None}])
+    upload = respx.post(f"{BASE}/upload")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"alpha")
+    result = run(["sync", str(src), ""], env)
+    assert result.exit_code == 0, result.output
+    assert "unchanged 1" in result.output
+    assert upload.calls == []
+
+
+@respx.mock
+def test_sync_matches_an_nfd_local_name_to_its_nfc_row(env: dict[str, str], tmp_path: Path) -> None:
+    _state_with([_row("caf\u00e9.txt", b"same")])
+    upload = respx.post(f"{BASE}/upload")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "cafe\u0301.txt").write_bytes(b"same")
+    result = run(["sync", str(src), ""], env)
+    assert result.exit_code == 0, result.output
+    assert "unchanged 1" in result.output
+    assert upload.calls == []
+
+
+@respx.mock
+def test_sync_reports_a_desktop_nfd_row_and_carries_on(env: dict[str, str], tmp_path: Path) -> None:
+    row = {**_row("x", b"old"), "path_hash": [3] * 32, "relative_path": "cafe\u0301.txt"}
+    _state_with([row])
+    upload = respx.post(f"{BASE}/upload").mock(return_value=httpx.Response(200, json=UPLOADED))
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "caf\u00e9.txt").write_bytes(b"new")
+    (src / "b.txt").write_bytes(b"bravo")
+    result = run(["sync", str(src), ""], env)
+    assert result.exit_code == 3
+    assert "under another id" in result.stderr
+    assert set(_uploaded_paths(upload)) == {"b.txt"}
+
+
+@respx.mock
+def test_put_recursive_refuses_an_unstorable_name_before_any_request(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    state = _state_with([])
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"alpha")
+    (src / "zero\u200bwidth.txt").write_bytes(b"z")
+    result = run(["put", "-r", str(src), ""], env)
+    assert result.exit_code == 1
+    assert "cannot be stored" in result.output
+    assert state.calls == []
+
+
+def test_two_local_names_for_one_remote_path_are_refused(tmp_path: Path) -> None:
+    # Built by hand: macOS will not hold an NFC and an NFD name side by side.
+    tree = cli._Tree(
+        files=[(tmp_path / "caf\u00e9", "caf\u00e9"), (tmp_path / "cafe\u0301", "cafe\u0301")],
+        empty_dirs=[],
+        skipped=[],
+    )
+    with pytest.raises(click.ClickException, match="both map to"):
+        cli._check_targets(tree)
+
+
+@respx.mock
+def test_tree_batches_follow_the_server_caps(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "MAX_FOLDER_ENTRIES_BATCH", 1)
+    monkeypatch.setattr(cli, "MAX_BATCH_DELETE", 1)
+    _state_with([_row("x.txt"), _row("y.txt")])
+    dirs = _dirs_route()
+    delete = respx.post(f"{BASE}/delete_files").mock(
+        return_value=httpx.Response(200, json={"Success": {"files_deleted": 1}})
+    )
+    src = tmp_path / "src"
+    (src / "d1").mkdir(parents=True)
+    (src / "d2").mkdir()
+    result = run(["sync", str(src), "", "--delete"], env)
+    assert result.exit_code == 0, result.output
+    sent = [json.loads(call.request.content)["relative_paths"] for call in dirs.calls]
+    assert sent == [["d1"], ["d2"]]
+    assert len(delete.calls) == 2
+    assert "deleted 2" in result.output
+
+
+def test_a_tree_prefix_of_slash_is_refused(env: dict[str, str], tmp_path: Path) -> None:
+    result = run(["sync", str(tmp_path), "/"], env)
+    assert result.exit_code == 1
+    assert "relative_path" in result.output
+
+
+@respx.mock
+def test_get_recursive_reports_a_file_that_cannot_be_written(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([_row("a"), _row("a/b")])
+    for path in ["a", "a/b"]:
+        file_id = hashes.path_hash(path).hex()
+        respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
+            return_value=httpx.Response(200, content=file_cipher.encrypt_bytes(b"x", key()))
+        )
+    result = run(["get", "-r", "", str(tmp_path / "out")], env)
+    assert result.exit_code == 1
+    assert "cannot write" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_get_recursive_refuses_a_file_as_dest(env: dict[str, str], tmp_path: Path) -> None:
+    result = run(["get", "-r", "", str(_local(tmp_path))], env)
+    assert result.exit_code == 1
+    assert "get -r writes into a directory" in result.output

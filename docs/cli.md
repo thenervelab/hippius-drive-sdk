@@ -155,7 +155,10 @@ hippius-drive get -r work/reports ./reports         # download every file under 
 ```
 
 The remote directory is the second argument; `""` is the folder root. Paths
-below it are the paths below the local directory.
+below it are the paths below the local directory. Every local name is checked
+against the server's path rules before any request, so a name the server would
+refuse (a control or zero-width character, a segment over 255 bytes), or two
+names that differ only in Unicode normalisation, stop the command up front.
 
 `put -r` treats every file the way `put` does. A file that already exists is
 reported on stderr and not uploaded, the other files still are, and the command
@@ -167,14 +170,22 @@ skipped and named on stderr; they are never followed. A local directory with
 nothing to upload below it is created remotely, as `mkdir` would.
 
 `sync` is one way, local to remote, and keeps no state between runs. It lists
-the remote directory once and compares each local file's content hash with the
+the remote folder once and compares each local file's content hash with the
 listed one: a new file is uploaded, a changed file replaces the remote copy by
 compare-and-swap, an identical one is left alone. A remote change made since the
 last run is replaced, not merged; for a folder edited in more than one place use
-the desktop app, which keeps the history a two-way sync needs. Remote files are
-deleted only with `--delete`, and only those under the remote directory. A
-file someone else wrote between the listing and the upload is reported and
-exits 3, like `put --overwrite`.
+the desktop app, which keeps the history a two-way sync needs.
+
+Remote files are deleted only with `--delete`, and only those under the remote
+directory with no local file at the same path. Each delete quotes the revision
+the listing showed, so a file edited after the listing stays. Remote files at
+or below a skipped local path (a symlink) are kept. Remote empty directories
+are not deleted.
+
+Whatever someone else does between the listing and the write is left alone:
+a file created or edited in that window is reported on stderr, the rest
+continue, and the command exits 3. A file the desktop app stored under an NFD
+name is reported the same way. A failed delete exits 1 after the summary line.
 
 `get -r` writes each listed file under the remote directory to the local
 directory, replacing local files of the same name, and refuses a path that
