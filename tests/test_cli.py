@@ -2,6 +2,7 @@ import ast
 import base64
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -2118,6 +2119,62 @@ def test_get_recursive_writes_files_under_dest_with_relative_paths(
     assert (dest / "sub" / "b.txt").read_bytes() == b"bravo"
     assert sorted(p.name for p in dest.rglob("*")) == ["a.txt", "b.txt", "sub"]
     assert "downloaded 2" in result.output
+
+
+def _downloads(files: dict[str, bytes]) -> dict[str, respx.Route]:
+    """A download route per remote path, each serving its own content."""
+    routes = {}
+    for path, body in files.items():
+        file_id = hashes.path_hash(path).hex()
+        routes[path] = respx.get(f"{BASE}/download/{SS58}/{FOLDER}/{file_id}").mock(
+            return_value=httpx.Response(200, content=file_cipher.encrypt_bytes(body, key()))
+        )
+    return routes
+
+
+@pytest.mark.skipif(sys.platform == "linux", reason="Linux disks are case-sensitive")
+@respx.mock
+def test_get_recursive_refuses_names_that_differ_only_in_case(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([_row("docs/A.txt"), _row("docs/a.txt"), _row("docs/b.txt")])
+    routes = _downloads({"docs/A.txt": b"upper", "docs/a.txt": b"lower", "docs/b.txt": b"bravo"})
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "docs", str(dest)], env)
+    assert result.exit_code == 3, result.output
+    assert "docs/A.txt is one local file with docs/a.txt" in result.stderr
+    assert "docs/a.txt is one local file with docs/A.txt" in result.stderr
+    assert routes["docs/A.txt"].calls == []
+    assert routes["docs/a.txt"].calls == []
+    assert [p.name for p in dest.iterdir()] == ["b.txt"]
+    assert "downloaded 1, refused 2" in result.output
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows drops trailing dots and spaces")
+@respx.mock
+def test_get_recursive_refuses_names_windows_strips_to_one(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([_row("x"), _row("x."), _row("dir /y"), _row("dir/y")])
+    routes = _downloads({"x": b"1", "x.": b"2", "dir /y": b"3", "dir/y": b"4"})
+    result = run(["get", "-r", "", str(tmp_path / "out")], env)
+    assert result.exit_code == 3, result.output
+    assert all(route.calls == [] for route in routes.values())
+    assert "refused 4" in result.output
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="macOS and Windows disks fold case")
+@respx.mock
+def test_get_recursive_writes_names_that_differ_only_in_case_on_linux(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _state_with([_row("A.txt"), _row("a.txt")])
+    _downloads({"A.txt": b"upper", "a.txt": b"lower"})
+    dest = tmp_path / "out"
+    result = run(["get", "-r", "", str(dest)], env)
+    assert result.exit_code == 0, result.output
+    assert (dest / "A.txt").read_bytes() == b"upper"
+    assert (dest / "a.txt").read_bytes() == b"lower"
 
 
 @needs_symlinks

@@ -950,7 +950,15 @@ def _get_tree(client: Client, target: str, dest: Path) -> None:
     if not listed:
         raise click.ClickException(f"no files under {prefix or 'the folder root'}")
     root = dest.resolve()
+    clashes = _local_clashes(list(listed))
+    for path in sorted(clashes):
+        others = ", ".join(p for p in clashes[path] if p != path)
+        click.echo(
+            f"refused   {path} is one local file with {others}; mv one to download it", err=True
+        )
     for path, entry in sorted(listed.items()):
+        if path in clashes:
+            continue
         out = _inside(root, path[len(prefix) + 1 :] if prefix else path)
         try:
             client.files.get(entry.file_id, out)
@@ -958,7 +966,35 @@ def _get_tree(client: Client, target: str, dest: Path) -> None:
             # A remote "a" next to "a/b", or a local directory where a file goes.
             raise click.ClickException(f"cannot write {out}: {exc.strerror}") from exc
         click.echo(f"wrote     {out}")
-    click.echo(f"downloaded {len(listed)}")
+    click.echo(f"downloaded {len(listed) - len(clashes)}, refused {len(clashes)}")
+    if clashes:
+        raise ConflictExit(f"{len(clashes)} files were not downloaded; see the lines above")
+
+
+def _local_clashes(paths: list[str]) -> dict[str, list[str]]:
+    """Map each remote path that shares a local file with another to all paths sharing it.
+
+    Remote paths are case-sensitive, so ``A.txt`` and ``a.txt`` can both
+    exist. The default macOS and Windows disks fold case, and Windows also
+    drops trailing dots and spaces (``x.`` is ``x``), so writing both would
+    leave one file holding whichever came last. None of a clashing group is
+    written: picking one would be a silent guess. A case-sensitive macOS
+    volume gets the same refusal; ``mv`` on one of the remote files fixes
+    either.
+    """
+    groups: dict[str, list[str]] = {}
+    for path in sorted(paths):
+        groups.setdefault(_local_name(path), []).append(path)
+    return {path: group for group in groups.values() if len(group) > 1 for path in group}
+
+
+def _local_name(path: str) -> str:
+    """``path`` as the default disk of this platform compares names."""
+    if sys.platform == "win32":
+        path = "/".join(part.rstrip(". ") for part in path.split("/"))
+    if sys.platform in ("darwin", "win32"):
+        return path.casefold()
+    return path
 
 
 def _inside(root: Path, relative: str) -> Path:
@@ -990,7 +1026,10 @@ def get(obj: Context, target: str, dest: Path, recursive: bool) -> None:
 
     With -r, every listed file under the directory TARGET is written to
     DEST/<path below TARGET>, replacing local files of the same name. Empty
-    directories are not recreated. The first error stops the download.
+    directories are not recreated. Remote files whose names this disk treats
+    as one (A.txt and a.txt on macOS and Windows) are reported and none of
+    them is written; the rest are, and the command exits 3. Any other error
+    stops the download.
     """
     if recursive:
         with obj.client() as client:
