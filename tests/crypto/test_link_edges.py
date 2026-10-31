@@ -58,7 +58,7 @@ def test_share_helpers_reject_malformed_inputs() -> None:
     assert sharing.decrypt_filename(random_name, nonce, KEY) == "a"
     wrapped = sharing.wrap_share_key("hunter22", KEY, salt=bytes(16), nonce=bytes(24))
     url = sharing.file_share_url_private("https://x.io", "tok", wrapped)
-    token, opened = _links.share_key_from_url(url, "hunter22", folder=False)
+    token, opened = _links.share_key_from_url(url, "hunter22")
     assert token == "tok"
     assert opened == KEY
 
@@ -136,7 +136,7 @@ def test_owner_wrap_rejects_a_bad_plaintext() -> None:
     with pytest.raises(ValueError, match="role"):
         Identity(ident.account_ss58, ident.label, ident.folder_hash, ident.keys, role="guest")
     with pytest.raises(ValueError, match="8"):
-        _links.folder_share_body(ident, FolderShareSpec("work", "Name", password="short"))
+        _links.prepare_folder_share(ident, FolderShareSpec("work", "Name", password="short"))
     manager = Identity.for_shared_drive(
         kdf.derive_folder_mnemonic(MASTER, "default"),
         owner_ss58=SS58,
