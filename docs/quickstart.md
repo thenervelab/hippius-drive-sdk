@@ -187,6 +187,8 @@ on, its counts. Turning a switch on needs a paid Drive plan
 when the plan source is down, so retry).
 
 ```python
+from hippius_drive import CommentAuthor
+
 client.shares.update_settings(token, insights=True, comments=True)
 
 stats = client.shares.insights(token)
@@ -197,6 +199,12 @@ for comment in client.shares.comments(created.share_url):
     print(comment.id, comment.name, comment.text)  # text is None if it will not open
 
 client.shares.post_comment(created.share_url, "see 0:42", at_ms=42_000)  # anonymous
+
+# Under a name: keep one 32-byte secret (os.urandom(32)) and reuse it, so the
+# owner's insights count all your comments on a link as one viewer.
+me = CommentAuthor("Grace", viewer_secret)
+ada = next(c for c in client.shares.mention_candidates(created.share_url) if c.name == "Ada")
+client.shares.post_comment(created.share_url, "thanks @Ada", author=me, mentions=[ada])
 client.shares.delete_comment(token, "41")
 print(client.shares.reactions(token).counts)
 

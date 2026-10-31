@@ -57,7 +57,7 @@ hippius-drive share reactions TOKEN
 hippius-drive share react 🔥 TOKEN                                # unreact, moments, block, unblock, seen
 ```
 
-Comments are encrypted under the link's key, so reading or posting them needs the share URL (in an owner-only file or `HIPPIUS_SHARE_URL`, never on the command line). For the owner's own console link, `TOKEN` alone works: the URL is rebuilt from the owner wrap. On the Free Drive plan switches stay off (`403 paid_plan_required`) and insights show counts only. A `#p=` link's password goes in `HIPPIUS_SHARE_PASSWORD`. In code: `client.shares.update_settings`, `insights`, `viewer_names`, `comments`, `post_comment`, `delete_comment`, `reactions`, `react`, `unreact`, `react_at`, `reaction_moments`, `block_author`, `unblock_author`, `mark_insights_seen`, `recover_url`.
+Comments are encrypted under the link's key, so reading or posting them needs the share URL (in an owner-only file or `HIPPIUS_SHARE_URL`, never on the command line). For the owner's own console link, `TOKEN` alone works: the URL is rebuilt from the owner wrap. On the Free Drive plan switches stay off (`403 paid_plan_required`) and insights show counts only. A `#p=` link's password goes in `HIPPIUS_SHARE_PASSWORD`. In code: `client.shares.update_settings`, `insights`, `viewer_names`, `comments`, `post_comment`, `delete_comment`, `mention_candidates` (post with `author=CommentAuthor(name, secret)` and `mentions=`), `reactions`, `react`, `unreact`, `react_at`, `reaction_moments`, `block_author`, `unblock_author`, `mark_insights_seen`, `recover_url`.
 
 Paying and plans: https://docs.hippius.com/use/console/billing
 What the console Drive UI does: https://docs.hippius.com/use/console/drive
