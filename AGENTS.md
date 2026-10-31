@@ -200,7 +200,10 @@ hippius-drive init --phrase-file F          # import; never printed
 hippius-drive whoami                        # first check on a 403
 hippius-drive register
 hippius-drive put report.pdf work/report.pdf
+hippius-drive put -r ./reports work/reports # a tree; existing files refused (exit 3)
+hippius-drive sync ./reports work/reports   # one way: new/changed only; --delete to prune
 hippius-drive get work/report.pdf out.pdf   # path or 64-char file id
+hippius-drive get -r work/reports ./reports
 hippius-drive ls work
 hippius-drive ls --all                      # includes rows with no plaintext path
 hippius-drive mv work/a.pdf archive/a.pdf   # looks up the revision for you
@@ -217,7 +220,7 @@ Replacing via CLI: `put --overwrite` (compare-and-swap on the revision it
 reads; a lost race and a plain put onto an existing path both exit 3), or
 explicit `--base-revision` and `--revision-seq`. Share and
 invite commands print the URL once; that URL is the key. Failures print one
-line and exit 1 — no traceback (exit 3 for a `put` conflict). Full flag list: [docs/cli.md](docs/cli.md).
+line and exit 1 — no traceback (exit 3 for a `put`, `put -r` or `sync` conflict). Full flag list: [docs/cli.md](docs/cli.md).
 
 A member client's `account_ss58` is the drive **owner**. The bearer token is
 the member's. Do not recompute `folder_hash` from a label the member chose;
@@ -225,7 +228,8 @@ use the hash from the invite or the membership row.
 
 ### Not in v1 — do not invent these
 
-The sync engine, recovery bindings, mnemonic-blob **server** endpoints, admin
+The two-way sync engine (three-tree state; the CLI `sync` is one-way and
+stateless), recovery bindings, mnemonic-blob **server** endpoints, admin
 endpoints, and S3-gateway variants are out of scope. The `crypto/` module does
 implement both local mnemonic-at-rest formats (`enc_mnemonic.json` and the
 console Argon2id sealed blob), plus the share-link, owner-wrap, and grant
@@ -353,7 +357,7 @@ different field names, fix the replay in the same PR that commits the file.
 
 ### What not to do
 
-- Do not add v1-excluded features (sync, recovery, admin, S3-gateway) unless
+- Do not add v1-excluded features (two-way sync, recovery, admin, S3-gateway) unless
   the task explicitly is that work.
 - Do not SS58-encode a key and call it `account_ss58`.
 - Do not log phrases, tokens, or folder keys in tests beyond the already-public

@@ -144,6 +144,43 @@ into a path whose directory does not exist yet creates it implicitly.
 
 `mv` looks the current revision up for you, so it needs no flags.
 
+## Directories
+
+```bash
+hippius-drive put -r ./reports work/reports         # upload a tree; refuses existing files
+hippius-drive put -r ./reports work/reports --overwrite
+hippius-drive sync ./reports work/reports           # upload only new and changed files
+hippius-drive sync ./reports work/reports --delete  # and delete remote files gone locally
+hippius-drive get -r work/reports ./reports         # download every file under a directory
+```
+
+The remote directory is the second argument; `""` is the folder root. Paths
+below it are the paths below the local directory.
+
+`put -r` treats every file the way `put` does. A file that already exists is
+reported on stderr and not uploaded, the other files still are, and the command
+exits 3 at the end; `--overwrite` replaces each one by compare-and-swap. Any
+other error (quota, auth, network after retries) stops at that file with exit
+code 1: it would fail every remaining file too. Files uploaded before the stop
+stay, so rerun with `sync` to finish. Symlinks and other non-regular files are
+skipped and named on stderr; they are never followed. A local directory with
+nothing to upload below it is created remotely, as `mkdir` would.
+
+`sync` is one way, local to remote, and keeps no state between runs. It lists
+the remote directory once and compares each local file's content hash with the
+listed one: a new file is uploaded, a changed file replaces the remote copy by
+compare-and-swap, an identical one is left alone. A remote change made since the
+last run is replaced, not merged; for a folder edited in more than one place use
+the desktop app, which keeps the history a two-way sync needs. Remote files are
+deleted only with `--delete`, and only those under the remote directory. A
+file someone else wrote between the listing and the upload is reported and
+exits 3, like `put --overwrite`.
+
+`get -r` writes each listed file under the remote directory to the local
+directory, replacing local files of the same name, and refuses a path that
+would land outside it. Files with no stored plaintext path cannot be placed
+and are not downloaded; empty directories are not recreated.
+
 `ls` shows directories first with recursive byte totals, then files. With no
 paging flags it lists the whole directory, fetching as many pages as that
 takes. `--limit` and `--offset` ask for a single page instead; the server

@@ -6,7 +6,7 @@ Part of the Hippius docs for agents. Start at https://docs.hippius.com/llms.txt
 
 ## What it is and what it does
 
-A scriptable client for the same Drive a person sees in the console, the desktop app, and the Android app. It is alpha. The sync engine and recovery bindings are not in this version.
+A scriptable client for the same Drive a person sees in the console, the desktop app, and the Android app. It is alpha. The CLI uploads a directory with `hippius-drive put -r LOCAL_DIR REMOTE_DIR`, downloads one with `get -r`, and pushes local changes one way with `hippius-drive sync LOCAL_DIR REMOTE_DIR` (new and changed files only; remote files are deleted only with `--delete`). Two-way sync and recovery bindings are not in this version: for a folder edited in more than one place, use the desktop app.
 
 Drive is not S3. A file put through this SDK does not appear in an S3 bucket.
 
