@@ -138,6 +138,12 @@ def test_download_and_delete_paths() -> None:
     assert build.delete("5G", "abc", "ff" * 32) == Request("DELETE", f"/delete/5G/abc/{'ff' * 32}")
 
 
+def test_delete_files_sends_expected_revisions_as_int_arrays() -> None:
+    r = build.delete_files("5G", "abc", ["aa"], expected_revisions={"aa": bytes([7] * 32)})
+    assert r.json is not None
+    assert r.json["expected_revision_ids"] == {"aa": [7] * 32}
+
+
 def test_delete_files_body() -> None:
     r = build.delete_files("5G", "abc", ["aa", "bb"], quiet=True)
     assert r.json == {

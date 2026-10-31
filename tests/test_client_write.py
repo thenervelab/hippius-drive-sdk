@@ -69,7 +69,7 @@ def test_delete_many_reports_per_id_outcomes(client: Client) -> None:
                         {"file_id": "aa", "status": "deleted"},
                         {"file_id": "bb", "status": "already_deleted"},
                     ],
-                    "errors": [{"file_id": "cc", "error": "database_error"}],
+                    "errors": [{"file_id": "cc", "code": "database_error", "message": "db down"}],
                     "files_deleted": 1,
                 }
             },
@@ -77,7 +77,7 @@ def test_delete_many_reports_per_id_outcomes(client: Client) -> None:
     )
     result = client.files.delete_many(["aa", "bb", "cc"])
     assert result.files_deleted == 1
-    assert result.errors[0].file_id == "cc"
+    assert (result.errors[0].file_id, result.errors[0].code) == ("cc", "database_error")
     body = json.loads(route.calls.last.request.content)
     assert body == {
         "ss58_address": SS58,

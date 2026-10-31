@@ -7,7 +7,7 @@ implementation and lets the tests pin request shapes without a server.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import IO, Any
 from urllib.parse import quote
@@ -571,7 +571,11 @@ class RequestBuilders:
 
     @staticmethod
     def delete_files(
-        ss58: str, folder_hash: str, file_ids: list[str], quiet: bool = False
+        ss58: str,
+        folder_hash: str,
+        file_ids: list[str],
+        quiet: bool = False,
+        expected_revisions: Mapping[str, bytes] | None = None,
     ) -> Request:
         """Build ``POST /delete_files``. Returns 200 even on partial failure.
 
@@ -580,20 +584,24 @@ class RequestBuilders:
             folder_hash: The folder the files live in.
             file_ids: Up to 1000 hex path hashes.
             quiet: Omit successful entries and return only errors.
+            expected_revisions: Per-id ``revision_id`` preconditions, sent as
+                ``expected_revision_ids``. Omitted when None, so the body is
+                byte-identical to one from before the field existed.
 
         Returns:
             The request.
         """
-        return Request(
-            "POST",
-            "/delete_files",
-            json={
-                "ss58_address": ss58,
-                "folder_hash": folder_hash,
-                "file_ids": file_ids,
-                "quiet": quiet,
-            },
-        )
+        body: dict[str, Any] = {
+            "ss58_address": ss58,
+            "folder_hash": folder_hash,
+            "file_ids": file_ids,
+            "quiet": quiet,
+        }
+        if expected_revisions is not None:
+            body["expected_revision_ids"] = {
+                file_id: list(revision) for file_id, revision in expected_revisions.items()
+            }
+        return Request("POST", "/delete_files", json=body)
 
     @staticmethod
     def rename_files(
