@@ -56,7 +56,7 @@ hippius-drive share comment-post "see 0:42" --url-file link.txt
 hippius-drive share reactions TOKEN
 ```
 
-Comments are encrypted under the link's key, so reading or posting them needs the share URL (in an owner-only file or `HIPPIUS_SHARE_URL`, never on the command line). For the owner's own console link, `TOKEN` alone works: the URL is rebuilt from the owner wrap. On the Free Drive plan switches stay off (`403 paid_plan_required`) and insights show counts only. In code: `client.shares.update_settings`, `insights`, `comments`, `post_comment`, `delete_comment`, `reactions`, `recover_url`.
+Comments are encrypted under the link's key, so reading or posting them needs the share URL (in an owner-only file or `HIPPIUS_SHARE_URL`, never on the command line). For the owner's own console link, `TOKEN` alone works: the URL is rebuilt from the owner wrap. On the Free Drive plan switches stay off (`403 paid_plan_required`) and insights show counts only. A `#p=` link's password goes in `HIPPIUS_SHARE_PASSWORD`. In code: `client.shares.update_settings`, `insights`, `viewer_names`, `comments`, `post_comment`, `delete_comment`, `reactions`, `recover_url`.
 
 Paying and plans: https://docs.hippius.com/use/console/billing
 What the console Drive UI does: https://docs.hippius.com/use/console/drive

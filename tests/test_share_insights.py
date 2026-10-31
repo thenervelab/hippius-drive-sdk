@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from hippius_drive import PaidPlanRequired, ShareComment, errors
 from hippius_drive._links import DEFAULT_CONSOLE
@@ -204,30 +205,46 @@ PAID: dict[str, Any] = {
 @respx.mock
 @pytest.mark.anyio
 @MODES
-async def test_insights_from_the_url_decrypt_viewer_names(mode: str) -> None:
+async def test_insights_read_by_token_and_names_open_with_the_url(mode: str) -> None:
     _capabilities(**ALL_ON)
     route = respx.get(f"{SHARE}/insights").mock(return_value=httpx.Response(200, json=PAID))
 
-    found = await _on_shares(mode, lambda s: s.insights(URL))
+    found = await _on_shares(mode, lambda s: s.insights(TOKEN))
+    names = await _on_shares(mode, lambda s: s.viewer_names(found, URL))
 
     assert route.calls.last.request.headers["Authorization"] == "Bearer tok"
     assert found.plan == "paid"
     assert found.completion_rate == 0.25
-    assert [v.name for v in found.viewers] == ["Ahmad", None]
     assert found.viewers[0].watched_ms == 78000
+    assert names == {"AQEBAQEBAQEBAQEBAQEBAQ": "Ahmad"}
 
 
 @respx.mock
 @pytest.mark.anyio
 @MODES
-async def test_insights_from_a_token_leave_names_sealed(mode: str) -> None:
+async def test_a_name_the_server_sends_in_the_clear_is_ignored(mode: str) -> None:
+    _capabilities(**ALL_ON)
+    spoofed = {**PAID, "viewers": [{**PAID["viewers"][1], "name": "Hippius Support"}]}
+    respx.get(f"{SHARE}/insights").mock(return_value=httpx.Response(200, json=spoofed))
+
+    found = await _on_shares(mode, lambda s: s.insights(TOKEN))
+    names = await _on_shares(mode, lambda s: s.viewer_names(found, URL))
+
+    assert "name" not in found.viewers[0].model_dump()
+    assert names == {}
+
+
+@respx.mock
+@pytest.mark.anyio
+@MODES
+async def test_viewer_names_from_another_link_do_not_open(mode: str) -> None:
     _capabilities(**ALL_ON)
     respx.get(f"{SHARE}/insights").mock(return_value=httpx.Response(200, json=PAID))
+    other = sharing.file_share_url(DEFAULT_CONSOLE, "otherToken", SHARE_KEY)
 
     found = await _on_shares(mode, lambda s: s.insights(TOKEN))
 
-    assert [v.name for v in found.viewers] == [None, None]
-    assert found.viewers[0].name_ct == PAID["viewers"][0]["name_ct"]
+    assert await _on_shares(mode, lambda s: s.viewer_names(found, other)) == {}
 
 
 @respx.mock
@@ -243,7 +260,7 @@ async def test_free_plan_insights_name_what_is_locked(mode: str) -> None:
     }
     respx.get(f"{SHARE}/insights").mock(return_value=httpx.Response(200, json=free))
 
-    found = await _on_shares(mode, lambda s: s.insights(URL))
+    found = await _on_shares(mode, lambda s: s.insights(TOKEN))
 
     assert found.plan == "free"
     assert found.total_views == 2
@@ -341,13 +358,51 @@ async def test_comments_page_through_and_decrypt(mode: str) -> None:
 @respx.mock
 @pytest.mark.anyio
 @MODES
-async def test_a_repeated_cursor_is_an_invalid_response(mode: str) -> None:
+async def test_a_cursor_the_server_already_gave_is_an_invalid_response(mode: str) -> None:
     _capabilities(**ALL_ON)
-    page = {"comments": [], "next_after": "7"}
+    pages = [{"comments": [], "next_after": cursor} for cursor in ("7", "8", "7")]
+    route = respx.get(f"{SHARE}/comments").mock(
+        side_effect=[httpx.Response(200, json=page) for page in pages]
+    )
+
+    with pytest.raises(errors.InvalidResponse, match="already gave"):
+        await _on_shares(mode, lambda s: s.comments(URL))
+
+    assert route.call_count == 3
+
+
+@respx.mock
+@pytest.mark.anyio
+@MODES
+async def test_names_that_claim_the_owner_or_hippius_are_marked(mode: str) -> None:
+    _capabilities(**ALL_ON)
+    key = comments.comment_key(SHARE_KEY)
+
+    def named(comment_id: str, name: str, **extra: Any) -> dict[str, Any]:
+        nonce = bytes(12)
+        plaintext = comments.comment_plaintext("hi", name)
+        sealed = AESGCM(key).encrypt(nonce, plaintext, f"{TOKEN}:comment".encode())
+        return {
+            "id": comment_id,
+            "ciphertext": base64.b64encode(sealed).decode(),
+            "nonce": base64.b64encode(nonce).decode(),
+            **extra,
+        }
+
+    rows = [
+        named("1", "Grace", owner=True),
+        named("2", " grace "),
+        named("3", "Hippius  Support"),
+        named("4", "\uff2f\uff37\uff2e\uff25\uff32"),
+        named("5", "Grace", anonymous=True),
+        named("6", "Ada"),
+    ]
+    page = {"comments": rows, "next_after": None}
     respx.get(f"{SHARE}/comments").mock(return_value=httpx.Response(200, json=page))
 
-    with pytest.raises(errors.InvalidResponse, match="same cursor"):
-        await _on_shares(mode, lambda s: s.comments(URL))
+    found = await _on_shares(mode, lambda s: s.comments(URL))
+
+    assert [c.name_claimed for c in found] == [False, True, True, True, False, False]
 
 
 @respx.mock
@@ -490,14 +545,16 @@ async def test_a_lost_post_is_not_posted_twice(mode: str) -> None:
 @pytest.mark.anyio
 @MODES
 async def test_delete_comment_names_the_comment(mode: str) -> None:
-    _capabilities(**ALL_ON)
+    caps = _capabilities(**ALL_ON)
     route = respx.delete(f"{SHARE}/comments/41").mock(return_value=httpx.Response(204))
 
     await _on_shares(mode, lambda s: s.delete_comment(TOKEN, "41"))
 
     assert route.called
+    asked = caps.call_count
     with pytest.raises(ValueError, match="comment id"):
         await _on_shares(mode, lambda s: s.delete_comment(TOKEN, "../41"))
+    assert caps.call_count == asked
 
 
 @respx.mock

@@ -211,6 +211,7 @@ hippius-drive share comments TOKEN                        # your own share with 
 hippius-drive share comments --url-file link.txt          # any share: the URL is the key
 HIPPIUS_SHARE_URL="$(cat link.txt)" hippius-drive share comments --json
 hippius-drive share comment-post "see 0:42" TOKEN --at-ms 42000
+hippius-drive share comment-post - TOKEN < comment.txt   # text from stdin
 hippius-drive share comment-post "agreed" TOKEN --reply-to 41
 hippius-drive share comment-rm TOKEN 41
 hippius-drive share reactions TOKEN
@@ -221,21 +222,26 @@ that read or post them need the share URL. They take it from `--url-file`
 (an owner-only file, or `-` for stdin) or `HIPPIUS_SHARE_URL`, never from the
 command line. For your own share, `TOKEN` alone is enough when the share has an
 owner wrap (links minted in the console do; `share put` links do not): the URL
-is rebuilt from it with your recovery phrase. A `#p=` link also needs
-`--password` or `HIPPIUS_SHARE_PASSWORD`. `insights` reads the numbers without
-the key and shows viewer names only when it has one.
+is rebuilt from it with your recovery phrase. A `#p=` link's password comes
+from `HIPPIUS_SHARE_PASSWORD` only; there is no flag, because argv is visible
+to other processes. `insights` reads the numbers without the key and shows
+viewer names only when it has one; otherwise it says why they are hidden.
 
 Posted comments are anonymous. Reading is open to anyone with the link;
 posting needs a signed-in account and the owner's `comments` switch on.
-Comment text and names come from anyone with the link: plain output replaces
-terminal control characters with `?`; `--json` has the exact text.
+Comment text and names come from anyone with the link. Plain output prints a
+name as a quoted string, so it cannot pass for the `[owner]` badge the server
+vouches for, and adds ` (viewer)` after a name that claims to be the owner or
+Hippius, as the console does. Control characters, line separators and bidi
+controls become `?`; `--json` has the exact text.
 
 Switches start off. Turning one on needs a paid Drive plan: on the Free plan
 the server refuses with `403 paid_plan_required` and the command says to
 upgrade. `502 billing_unavailable` means the plan service did not answer;
 run it again later. Insights on the Free plan show the counts and list the
-rest as locked. A server with `share_insights` or `share_comments` off in
-`GET /v1/capabilities` gets a message naming the flag and no request.
+rest as locked. Each command reads `GET /v1/capabilities` first; when
+`share_insights` or `share_comments` is off it stops with a message naming the
+flag instead of calling the feature's route.
 
 ## Shared drives
 

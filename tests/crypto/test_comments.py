@@ -204,3 +204,44 @@ def test_white_space_between_zero_width_characters_is_blank(separator: str) -> N
     # The trim cannot reach a separator that zero-width characters fence in;
     # only the White_Space check makes this name blank.
     assert comments.clean_name(f"\u200b{separator}\u200b") is None
+
+
+def test_the_plaintext_escapes_like_json_stringify() -> None:
+    # Pinned from Node: Buffer.from(JSON.stringify({text, name})).toString("hex")
+    # with the same text and name. JSON.stringify escapes only quote,
+    # backslash and U+0000-U+001F; DEL, C1 controls, U+2028/U+2029 and every
+    # other character go out as raw UTF-8.
+    text = 'q"b\\s\x01\x08\x0c\n\r\t\x1f\x7f\x85\x9b\xe9\u2028\u2029\U0001f600/<>&'
+    expected = (
+        "7b2274657874223a22715c22625c5c735c75303030315c625c665c6e5c725c745c75303031667fc285c2"
+        "9bc3a9e280a8e280a9f09f98802f3c3e26222c226e616d65223a225a6fc3ab20e280ae227d"
+    )
+    assert comments.comment_plaintext(text, "Zo\xeb \u202e").hex() == expected
+
+
+def test_a_plaintext_with_a_byte_order_mark_opens_as_in_the_console() -> None:
+    nonce = b"\x04" * 12
+    plaintext = b"\xef\xbb\xbf" + comments.comment_plaintext("hi", None)
+    sealed = AESGCM(KEY).encrypt(nonce, plaintext, f"{TOKEN}:comment".encode())
+
+    opened = comments.open_comment(
+        KEY, TOKEN, base64.b64encode(sealed).decode(), base64.b64encode(nonce).decode()
+    )
+
+    assert opened == comments.CommentText("hi", None)
+
+
+@pytest.mark.parametrize(
+    ("name", "reserved"),
+    [
+        ("Hippius Support", True),
+        ("hippiussupport", True),
+        ("The Owner", True),
+        ("ad\u200bmin", True),
+        ("\uff33\uff35\uff30\uff30\uff2f\uff32\uff34", True),
+        ("Ownerly", False),
+        ("Grace", False),
+    ],
+)
+def test_reserved_names_match_the_console(name: str, reserved: bool) -> None:
+    assert comments.is_reserved_name(name) is reserved

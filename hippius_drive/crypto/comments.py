@@ -95,6 +95,12 @@ _PREPENDED_MARKS = frozenset(
     (*range(0x0600, 0x0606), 0x06DD, 0x070F, 0x0890, 0x0891, 0x08E2, 0x110BD, 0x110CD)
 )
 
+# The console's RESERVED_NAMES (claimed-names.ts): only the owner's badge or
+# Hippius itself could carry these, so a commenter using one is marked.
+_RESERVED_NAMES = frozenset(
+    {"owner", "theowner", "linkowner", "fileowner", "support", "admin", "administrator"}
+)
+
 _BRAILLE_BLANK = 0x2800
 _SURROGATES = range(0xD800, 0xE000)
 
@@ -243,7 +249,9 @@ def clean_name(name: str | None) -> str | None:
     trimmed and cut to 80 code points. The console cuts between graphemes
     where the browser can; this cuts between code points, as the console does
     in a browser without ``Intl.Segmenter``. The two differ only for a name
-    over 80 code points whose cut falls inside an emoji sequence.
+    over 80 code points whose cut falls inside a grapheme of several code
+    points (an emoji sequence, a letter with a combining mark, a Hangul or
+    Indic cluster).
 
     Args:
         name: A decrypted name.
@@ -258,6 +266,22 @@ def clean_name(name: str | None) -> str | None:
     if all(_invisible(char) for char in kept):
         return None
     return kept
+
+
+def claim_key(name: str) -> str:
+    """A name as a reader takes it: NFKC, lower case, no spaces or format characters.
+
+    The console's ``normalizeClaimedName``: "Hippius  Support" and
+    "hippiussupport" are the same claim.
+    """
+    folded = unicodedata.normalize("NFKC", name).lower()
+    return "".join(c for c in folded if c not in _JS_TRIM and unicodedata.category(c) != "Cf")
+
+
+def is_reserved_name(name: str) -> bool:
+    """Whether a name passes itself off as Hippius, or as the owner by title."""
+    key = claim_key(name)
+    return "hippius" in key or key in _RESERVED_NAMES
 
 
 def _invisible(char: str) -> bool:
@@ -302,7 +326,8 @@ def _open(key: bytes, aad: bytes, ciphertext: str, nonce: str) -> object:
     except InvalidTag as exc:
         raise DecryptError("share comment does not open under this link's key") from exc
     try:
-        return json.loads(plaintext.decode())
+        # TextDecoder, which the console reads with, drops one leading BOM.
+        return json.loads(plaintext.decode("utf-8-sig"))
     except ValueError as exc:
         raise DecryptError("share comment is not JSON") from exc
 

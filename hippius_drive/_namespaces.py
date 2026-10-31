@@ -17,7 +17,7 @@ import httpx
 
 from hippius_drive import _links, _ops, _share_insights, errors
 from hippius_drive._upload import SPOOL_MAX, PlaintextSource, reader_over
-from hippius_drive._wire import parse_envelope
+from hippius_drive._wire import check_comment_id, parse_envelope
 from hippius_drive.crypto import file_cipher, invite_link
 from hippius_drive.crypto.sharing import ShareSecret
 from hippius_drive.models import (
@@ -266,16 +266,13 @@ class ShareOps:
         _share_insights.require_insights(_links.capabilities_or_disabled(self._client.run))
         return self._client.run(_ops.update_share_settings(token, body))
 
-    def insights(self, share_url_or_token: str, *, password: str | None = None) -> ShareInsights:
+    def insights(self, token: str) -> ShareInsights:
         """Read a file share's views and watch time. Owner only.
 
-        Viewer names are encrypted under the link's key: pass the share URL
-        to have them decrypted into each viewer's ``name``. A bare token
-        reads the numbers only.
+        Viewer names stay sealed; open them with :meth:`viewer_names`.
 
         Args:
-            share_url_or_token: The recipient URL, or the plaintext token.
-            password: Required when the URL is a ``#p=`` link.
+            token: The plaintext share token.
 
         Returns:
             The free-plan counts, or the paid-plan detail.
@@ -283,10 +280,25 @@ class ShareOps:
         Raises:
             ValueError: If the server has ``share_insights`` off.
         """
-        token, key = _share_insights.token_and_key(share_url_or_token, password)
         _share_insights.require_insights(_links.capabilities_or_disabled(self._client.run))
-        found = self._client.run(_ops.share_insights(token))
-        return _share_insights.name_viewers(found, token, key)
+        return self._client.run(_ops.share_insights(token))
+
+    def viewer_names(
+        self, insights: ShareInsights, share_url: str, *, password: str | None = None
+    ) -> dict[str, str]:
+        """Decrypt the viewer names in :meth:`insights` with the link's key. No request.
+
+        Args:
+            insights: From :meth:`insights` on the same share.
+            share_url: The share's recipient URL; its fragment is the key.
+            password: Required when the URL is a ``#p=`` link.
+
+        Returns:
+            Names by ``viewer_id``. A viewer without a name, or whose name
+            does not open, is absent.
+        """
+        token, key = _share_insights.link_key(share_url, password)
+        return _share_insights.viewer_names(insights, token, key)
 
     def comments(self, share_url: str, *, password: str | None = None) -> Sequence[ShareComment]:
         """Read and decrypt every comment on a file share, oldest first.
@@ -308,13 +320,14 @@ class ShareOps:
         token, key = _share_insights.link_key(share_url, password)
         _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
         found: list[ShareComment] = []
+        seen: set[str] = set()
         after: str | None = None
         while True:
             page = self._client.run(_ops.share_comments(token, after))
             found.extend(_share_insights.open_rows(page.comments, token, key))
-            after = _share_insights.next_cursor(page, after)
+            after = _share_insights.next_cursor(page, seen)
             if after is None:
-                return found
+                return _share_insights.mark_claimed_names(found)
 
     def post_comment(
         self,
@@ -353,13 +366,18 @@ class ShareOps:
     def delete_comment(self, token: str, comment_id: str) -> None:
         """Delete a comment: any on this account's link, or this account's own.
 
+        A timeout or 502 is retried; if the first attempt had already deleted
+        the comment, the retry answers ``NotFound``.
+
         Args:
             token: The plaintext share token.
             comment_id: The comment's ``id``.
 
         Raises:
-            ValueError: If the server has ``share_comments`` off.
+            ValueError: If the id is not a comment id, or the server has
+                ``share_comments`` off.
         """
+        check_comment_id(comment_id)
         _share_insights.require_comments(_links.capabilities_or_disabled(self._client.run))
         self._client.run(_ops.delete_share_comment(token, comment_id))
 
@@ -783,15 +801,18 @@ class AsyncShareOps:
         _share_insights.require_insights(caps)
         return await self._client.run(_ops.update_share_settings(token, body))
 
-    async def insights(
-        self, share_url_or_token: str, *, password: str | None = None
-    ) -> ShareInsights:
+    async def insights(self, token: str) -> ShareInsights:
         """Async twin of :meth:`ShareOps.insights`."""
-        token, key = _share_insights.token_and_key(share_url_or_token, password)
         caps = await _links.capabilities_or_disabled_async(self._client.run)
         _share_insights.require_insights(caps)
-        found = await self._client.run(_ops.share_insights(token))
-        return _share_insights.name_viewers(found, token, key)
+        return await self._client.run(_ops.share_insights(token))
+
+    def viewer_names(
+        self, insights: ShareInsights, share_url: str, *, password: str | None = None
+    ) -> dict[str, str]:
+        """Same as :meth:`ShareOps.viewer_names`; it makes no request, so it is not async."""
+        token, key = _share_insights.link_key(share_url, password)
+        return _share_insights.viewer_names(insights, token, key)
 
     async def comments(
         self, share_url: str, *, password: str | None = None
@@ -801,13 +822,14 @@ class AsyncShareOps:
         caps = await _links.capabilities_or_disabled_async(self._client.run)
         _share_insights.require_comments(caps)
         found: list[ShareComment] = []
+        seen: set[str] = set()
         after: str | None = None
         while True:
             page = await self._client.run(_ops.share_comments(token, after))
             found.extend(_share_insights.open_rows(page.comments, token, key))
-            after = _share_insights.next_cursor(page, after)
+            after = _share_insights.next_cursor(page, seen)
             if after is None:
-                return found
+                return _share_insights.mark_claimed_names(found)
 
     async def post_comment(
         self,
@@ -828,6 +850,7 @@ class AsyncShareOps:
 
     async def delete_comment(self, token: str, comment_id: str) -> None:
         """Async twin of :meth:`ShareOps.delete_comment`."""
+        check_comment_id(comment_id)
         caps = await _links.capabilities_or_disabled_async(self._client.run)
         _share_insights.require_comments(caps)
         await self._client.run(_ops.delete_share_comment(token, comment_id))

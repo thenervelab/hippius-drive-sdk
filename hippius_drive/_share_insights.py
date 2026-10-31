@@ -7,6 +7,7 @@ request bodies, the capability checks, and the decryption are written once.
 from __future__ import annotations
 
 import base64
+import dataclasses
 from collections.abc import Sequence
 from typing import Any
 
@@ -73,26 +74,14 @@ def link_key(share_url: str, password: str | None) -> tuple[str, bytes]:
     return token, comments.comment_key(share_key)
 
 
-def token_and_key(share_url_or_token: str, password: str | None) -> tuple[str, bytes | None]:
-    """Accept a plain token (no key) or a share URL (token and comment key)."""
-    if share_url_or_token.startswith("https://"):
-        return link_key(share_url_or_token, password)
-    return share_url_or_token, None
-
-
-def name_viewers(insights: ShareInsights, token: str, key: bytes | None) -> ShareInsights:
-    """Fill each viewer's ``name`` from its sealed name, when the key is known."""
-    if key is None:
-        return insights
-    viewers = [
-        viewer.model_copy(
-            update={
-                "name": comments.open_viewer_name(key, token, viewer.name_ct, viewer.name_nonce)
-            }
-        )
-        for viewer in insights.viewers
-    ]
-    return insights.model_copy(update={"viewers": viewers})
+def viewer_names(insights: ShareInsights, token: str, key: bytes) -> dict[str, str]:
+    """Each viewer's name by ``viewer_id``, for the names that open under ``key``."""
+    names: dict[str, str] = {}
+    for viewer in insights.viewers:
+        name = comments.open_viewer_name(key, token, viewer.name_ct, viewer.name_nonce)
+        if name is not None:
+            names[viewer.viewer_id] = name
+    return names
 
 
 def comment_body(
@@ -134,21 +123,50 @@ def require_replies(caps: Capabilities, parent_id: str | None) -> None:
         raise ValueError("this server has share_comment_replies off: it cannot take a reply")
 
 
-def next_cursor(page: CommentPage, previous: str | None) -> str | None:
-    """The cursor for the next page, or None after the last.
+def next_cursor(page: CommentPage, seen: set[str]) -> str | None:
+    """The cursor for the next page, or None after the last. Adds it to ``seen``.
 
     Raises:
-        InvalidResponse: If the server hands back the cursor it was given,
+        InvalidResponse: If the server hands back a cursor it already gave,
             which would page forever.
     """
-    if page.next_after is not None and page.next_after == previous:
-        raise errors.InvalidResponse("comment listing returned the same cursor twice")
-    return page.next_after
+    cursor = page.next_after
+    if cursor is None:
+        return None
+    if cursor in seen:
+        raise errors.InvalidResponse("comment listing returned a cursor it already gave")
+    seen.add(cursor)
+    return cursor
 
 
 def open_rows(rows: Sequence[CommentRow], token: str, key: bytes) -> list[ShareComment]:
     """Decrypt a page of comments. One that does not open keeps ``text=None``."""
     return [_open_row(row, token, key) for row in rows]
+
+
+def mark_claimed_names(thread: Sequence[ShareComment]) -> list[ShareComment]:
+    """Set ``name_claimed`` on each comment whose name is a claim it cannot back.
+
+    The console's ``markClaimedNames``: not the owner's comment, yet the name
+    is reserved or is a name the owner's own comments carry. It reads the
+    owner's names from the same thread, so it runs on the whole listing.
+    """
+    owner_names = {
+        comments.claim_key(item.name)
+        for item in thread
+        if item.owner and not item.anonymous and item.name
+    }
+    owner_names.discard("")
+    return [
+        dataclasses.replace(item, name_claimed=True) if _claims(item, owner_names) else item
+        for item in thread
+    ]
+
+
+def _claims(item: ShareComment, owner_names: set[str]) -> bool:
+    if item.owner or item.anonymous or not item.name:
+        return False
+    return comments.is_reserved_name(item.name) or comments.claim_key(item.name) in owner_names
 
 
 def owner_share_url(

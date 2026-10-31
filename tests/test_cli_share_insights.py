@@ -11,6 +11,7 @@ import httpx
 import pytest
 import respx
 from click.testing import CliRunner, Result
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from hippius_drive._links import DEFAULT_CONSOLE
 from hippius_drive.cli import main
@@ -183,7 +184,7 @@ def test_insights_read_names_through_the_owner_wrap(env: dict[str, str]) -> None
     assert result.exit_code == 0
     assert "views           3" in result.output
     assert "completion      50%" in result.output
-    assert "3 visits  61s  Ahmad" in result.output
+    assert '3 visits  61s  "Ahmad"' in result.output
     assert "hidden" not in result.output
 
 
@@ -203,7 +204,7 @@ def test_insights_without_a_key_say_names_are_hidden(env: dict[str, str]) -> Non
 
 @respx.mock
 def test_free_insights_name_what_is_locked_and_emit_json(env: dict[str, str]) -> None:
-    _listing()
+    # No listing route: with no sealed names there is no link to look for.
     _caps()
     free = {"plan": "free", "total_views": 2, "unique_viewers": 1, "locked": ["viewers"]}
     respx.get(f"{SHARE}/insights").mock(return_value=httpx.Response(200, json=free))
@@ -258,7 +259,7 @@ def test_comments_from_a_url_file_are_decrypted(env: dict[str, str], tmp_path: P
     assert route.called
     lines = result.output.splitlines()
     assert "1:23  anonymous: (deleted)" in lines[0]
-    assert "re 40  Ahmad (owner): Looks great at 1:23!" in lines[1]
+    assert 're 40  [owner] "Ahmad": Looks great at 1:23!' in lines[1]
     assert "-  anonymous: (does not open with this link's key)" in lines[2]
     assert URL not in result.output
 
@@ -387,3 +388,119 @@ def test_comment_rm_and_reactions(env: dict[str, str]) -> None:
     assert route.called
     assert reacted.output.splitlines() == ["\U0001f44d  3", "\U0001f525  1  (mine)"]
     assert as_json[1] == {"emoji": "\U0001f525", "count": 1, "mine": True}
+
+
+@respx.mock
+def test_insights_of_a_password_link_still_show_the_numbers(env: dict[str, str]) -> None:
+    wrapped = sharing.wrap_share_key("hunter22", SHARE_KEY)
+    secret = ShareSecret(wrapped, private=True)
+    wrap = owner_wrap.seal_file_secret(MASTER, SS58, TOKEN, secret)
+    _listing(owner_wrap=base64.b64encode(wrap).decode())
+    _caps()
+    paid = _paid(_vector("viewer-name")["ciphertext_b64"])
+    respx.get(f"{SHARE}/insights").mock(return_value=httpx.Response(200, json=paid))
+
+    hidden = run(["share", "insights", TOKEN], env)
+    named = run(["share", "insights", TOKEN], {**env, "HIPPIUS_SHARE_PASSWORD": "hunter22"})
+
+    assert hidden.exit_code == 0
+    assert "views           3" in hidden.output
+    assert "names are hidden: this is a password link" in hidden.output
+    assert '61s  "Ahmad"' in named.output
+
+
+@respx.mock
+def test_insights_json_carries_the_opened_names(env: dict[str, str]) -> None:
+    _caps()
+    paid = _paid(_vector("viewer-name")["ciphertext_b64"])
+    respx.get(f"{SHARE}/insights").mock(return_value=httpx.Response(200, json=paid))
+
+    result = run(["share", "insights", TOKEN, "--json"], {**env, "HIPPIUS_SHARE_URL": URL})
+
+    assert json.loads(result.output)["viewers"][0]["name"] == "Ahmad"
+
+
+def _sealed_row(comment_id: str, text: str, name: str | None, **extra: Any) -> dict[str, Any]:
+    key = comments.comment_key(SHARE_KEY)
+    nonce = bytes(12)
+    plaintext = comments.comment_plaintext(text, name)
+    sealed = AESGCM(key).encrypt(nonce, plaintext, f"{TOKEN}:comment".encode())
+    return {
+        "id": comment_id,
+        "ciphertext": base64.b64encode(sealed).decode(),
+        "nonce": base64.b64encode(nonce).decode(),
+        **extra,
+    }
+
+
+@respx.mock
+def test_a_name_cannot_pass_for_the_owner_badge(env: dict[str, str]) -> None:
+    _caps()
+    rows = [
+        _sealed_row("1", "real", "Grace", owner=True, at_ms=3_723_000),
+        _sealed_row("2", "fake", "Grace (owner)"),
+        _sealed_row("3", "fake", 'x" [owner] "Grace'),
+        _sealed_row("4", "fake", "grace"),
+    ]
+    page = {"comments": rows, "next_after": None}
+    respx.get(f"{SHARE}/comments").mock(return_value=httpx.Response(200, json=page))
+
+    result = run(["share", "comments"], {**env, "HIPPIUS_SHARE_URL": URL})
+
+    lines = result.output.splitlines()
+    assert lines[0].endswith('1:02:03  [owner] "Grace": real')
+    assert lines[1].endswith('-  "Grace (owner)": fake')
+    assert lines[2].endswith('-  "x\\" [owner] \\"Grace": fake')
+    assert lines[3].endswith('-  "grace" (viewer): fake')
+    assert sum('[owner] "Grace"' in line for line in lines) == 1
+
+
+@respx.mock
+def test_emoji_sequences_survive_the_terminal_filter(env: dict[str, str]) -> None:
+    _caps()
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    page = {"comments": [_sealed_row("1", f"hi {family}\u202e\u2028.", None)], "next_after": None}
+    respx.get(f"{SHARE}/comments").mock(return_value=httpx.Response(200, json=page))
+
+    result = run(["share", "comments"], {**env, "HIPPIUS_SHARE_URL": URL})
+
+    assert f"anonymous: hi {family}??." in result.output
+
+
+@respx.mock
+def test_comments_on_someone_elses_token_ask_for_the_link(env: dict[str, str]) -> None:
+    _listing()
+    result = run(["share", "comments", "notmine"], env)
+    assert result.exit_code == 1
+    assert "comments need the link's key" in result.output
+
+
+def test_a_password_link_without_its_password_says_where_to_put_it(env: dict[str, str]) -> None:
+    wrapped = sharing.wrap_share_key("hunter22", SHARE_KEY)
+    private = sharing.file_share_url_private(DEFAULT_CONSOLE, TOKEN, wrapped)
+
+    result = run(["share", "comments"], {**env, "HIPPIUS_SHARE_URL": private})
+
+    assert result.exit_code == 1
+    assert "HIPPIUS_SHARE_PASSWORD" in result.output
+
+
+@respx.mock
+def test_comment_post_reads_dash_from_stdin(env: dict[str, str]) -> None:
+    _caps()
+    route = respx.post(f"{SHARE}/comments").mock(
+        return_value=httpx.Response(201, json={"id": "52"})
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["share", "comment-post", "-"],
+        input="from stdin\n",
+        env={**env, "HIPPIUS_SHARE_URL": URL},
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    body = json.loads(route.calls.last.request.content)
+    key = comments.comment_key(SHARE_KEY)
+    assert comments.open_comment(key, TOKEN, body["ciphertext"], body["nonce"]).text == "from stdin"

@@ -189,8 +189,9 @@ when the plan source is down, so retry).
 ```python
 client.shares.update_settings(token, insights=True, comments=True)
 
-stats = client.shares.insights(created.share_url)  # a bare token works; names need the URL
+stats = client.shares.insights(token)
 print(stats.plan, stats.total_views, stats.locked)
+names = client.shares.viewer_names(stats, created.share_url)  # {viewer_id: name}, no request
 
 for comment in client.shares.comments(created.share_url):
     print(comment.id, comment.name, comment.text)  # text is None if it will not open
@@ -203,9 +204,11 @@ print(client.shares.reactions(token).counts)
 Comments and viewer names are encrypted in the console's format: AES-256-GCM
 under `HKDF-SHA256(share key, info="hippius-share-comments-v1")`, bound to the
 token. For a link minted in the console, rebuild its URL with
-`client.shares.recover_url(token, master_phrase)`. Each call checks
-`share_insights` or `share_comments` in `GET /v1/capabilities` first and
-raises `ValueError` naming the flag when it is off.
+`client.shares.recover_url(token, master_phrase)`. A comment's `name` is
+whatever its poster sealed; only `owner` is vouched for by the server, and
+`name_claimed` marks a name that claims to be the owner or Hippius. Each call
+checks `share_insights` or `share_comments` in `GET /v1/capabilities` first
+and raises `ValueError` naming the flag when it is off.
 
 ## Sharing a folder
 

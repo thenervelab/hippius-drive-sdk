@@ -783,10 +783,9 @@ class ShareViewer(_Wire):
         last_viewed_at: RFC 3339.
         comments: Named comments posted from this viewer's page.
         reactions: Always 0: reactions carry no viewer id.
-        name_ct: Standard base64 of the encrypted name, or None.
+        name_ct: Standard base64 of the encrypted name, or None. Open with
+            ``client.shares.viewer_names``.
         name_nonce: Its nonce.
-        name: The decrypted name. Filled by the SDK when the call had the
-            link's key and the name opened; the server never sends it.
     """
 
     viewer_id: str = ""
@@ -798,7 +797,6 @@ class ShareViewer(_Wire):
     reactions: int = 0
     name_ct: str | None = None
     name_nonce: str | None = None
-    name: str | None = None
 
 
 class ShareInsights(_Wire):
@@ -905,6 +903,10 @@ class ShareComment:
         blocked: The owner blocked its author through this comment. Only the
             owner's listing carries it.
         deleted: A stand-in for a deleted comment that still has replies.
+        name_claimed: Not the owner's comment, yet its name is the owner's
+            or claims to be Hippius, the owner, support or an admin. The name
+            is sealed by whoever posted it; only ``owner`` is vouched for by
+            the server. Show the name marked, as the console's " (viewer)".
     """
 
     id: str
@@ -918,6 +920,7 @@ class ShareComment:
     owner: bool
     blocked: bool
     deleted: bool
+    name_claimed: bool = False
 
 
 class ShareSummary(_Wire):

@@ -90,8 +90,8 @@ not in `__all__` — the CLI and the quickstart both import it.
 | Open a file share | `client.shares.open(share_url)` — anonymous; password links need `password=` |
 | List / revoke file shares | `client.shares.list()` / `client.shares.revoke(token)` |
 | A file share's switches | `row.settings` on `client.shares.list()`; change with `client.shares.update_settings(token, comments=True)` — on needs a paid Drive plan (`PaidPlanRequired`) |
-| A file share's views | `client.shares.insights(share_url_or_token)` — free plan: counts + `locked`; viewer names only from a URL |
-| Read a file share's comments | `client.shares.comments(share_url)` — decrypted; `text=None` when one will not open |
+| A file share's views | `client.shares.insights(token)` — free plan: counts + `locked`; names: `client.shares.viewer_names(stats, share_url)` |
+| Read a file share's comments | `client.shares.comments(share_url)` — decrypted; `text=None` when one will not open; trust `owner`, not `name` (`name_claimed`) |
 | Comment / delete a comment | `client.shares.post_comment(share_url, text)` (anonymous) / `client.shares.delete_comment(token, id)` |
 | Reaction counts | `client.shares.reactions(token)` |
 | Rebuild your share's URL | `client.shares.recover_url(token, master_phrase)` — needs the owner wrap the console stores |
@@ -216,7 +216,7 @@ hippius-drive share put report.pdf --name report.pdf
 hippius-drive share settings TOKEN --comments on   # paid Drive plan
 hippius-drive share insights TOKEN
 hippius-drive share comments --url-file F         # or HIPPIUS_SHARE_URL; TOKEN alone for your own console link
-hippius-drive share comment-post "text" --url-file F
+hippius-drive share comment-post "text" --url-file F   # TEXT - reads stdin; #p= password only via HIPPIUS_SHARE_PASSWORD
 hippius-drive share reactions TOKEN
 hippius-drive folder-share put --prefix work --name Work
 hippius-drive invite put --role writer --days 7
