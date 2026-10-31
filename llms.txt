@@ -44,6 +44,20 @@ with Client(token=token, identity=identity) as client:
 
 A token and an address that do not belong together fail the first request with 403.
 
+## Share link insights and comments
+
+A file share's views, viewers, comments and reactions:
+
+```bash
+hippius-drive share settings TOKEN --insights on --comments on   # paid Drive plan
+hippius-drive share insights TOKEN
+hippius-drive share comments --url-file link.txt                  # or HIPPIUS_SHARE_URL
+hippius-drive share comment-post "see 0:42" --url-file link.txt
+hippius-drive share reactions TOKEN
+```
+
+Comments are encrypted under the link's key, so reading or posting them needs the share URL (in an owner-only file or `HIPPIUS_SHARE_URL`, never on the command line). For the owner's own console link, `TOKEN` alone works: the URL is rebuilt from the owner wrap. On the Free Drive plan switches stay off (`403 paid_plan_required`) and insights show counts only. In code: `client.shares.update_settings`, `insights`, `comments`, `post_comment`, `delete_comment`, `reactions`, `recover_url`.
+
 Paying and plans: https://docs.hippius.com/use/console/billing
 What the console Drive UI does: https://docs.hippius.com/use/console/drive
 

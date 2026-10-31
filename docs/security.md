@@ -147,6 +147,13 @@ will serve. Anyone with the link can decrypt those files. A password wrap
 Treat both URLs as secrets. Do not put them in logs, tickets, or shell history
 you share.
 
+File-share comments and the names viewers post them under are encrypted under
+a key derived from the link's key (HKDF-SHA256, AES-256-GCM, the token in the
+AAD), the same format the console uses. The server stores the ciphertext and
+cannot read it. It does see when each comment was posted, the video moment it
+points at, which comment a reply answers, whether it is anonymous, and the
+reaction counts. Anyone holding the link can read every comment on it.
+
 ## Shared drives
 
 Joining a drive gives the member that drive's file key, sealed into the

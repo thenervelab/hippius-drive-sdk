@@ -179,6 +179,34 @@ is not in the URL. `open` then needs that password.
 The same client lists and revokes with `shares.list()` and `shares.revoke(token)`.
 A file larger than one 8 MiB ciphertext uses the chunked share routes on its own.
 
+### Insights, comments and reactions
+
+Each listing row carries the link's switches (`settings`) and, with insights
+on, its counts. Turning a switch on needs a paid Drive plan
+(`PaidPlanRequired` otherwise; `ServerError` with code `billing_unavailable`
+when the plan source is down, so retry).
+
+```python
+client.shares.update_settings(token, insights=True, comments=True)
+
+stats = client.shares.insights(created.share_url)  # a bare token works; names need the URL
+print(stats.plan, stats.total_views, stats.locked)
+
+for comment in client.shares.comments(created.share_url):
+    print(comment.id, comment.name, comment.text)  # text is None if it will not open
+
+client.shares.post_comment(created.share_url, "see 0:42", at_ms=42_000)  # anonymous
+client.shares.delete_comment(token, "41")
+print(client.shares.reactions(token).counts)
+```
+
+Comments and viewer names are encrypted in the console's format: AES-256-GCM
+under `HKDF-SHA256(share key, info="hippius-share-comments-v1")`, bound to the
+token. For a link minted in the console, rebuild its URL with
+`client.shares.recover_url(token, master_phrase)`. Each call checks
+`share_insights` or `share_comments` in `GET /v1/capabilities` first and
+raises `ValueError` naming the flag when it is off.
+
 ## Sharing a folder
 
 A folder share does not upload anything. The fragment is this drive's file key,
@@ -269,6 +297,7 @@ Every failure the service, the transport or the decrypt step reports is a
 | `Unauthorized` | 401 | Token missing, malformed or rejected |
 | `Forbidden` | 403 | Token resolves to a different account than the request names |
 | `MemberLimitReached` | 403 | `Forbidden` subclass: the drive is full; the invite stays live, retry later. Carries `member_limit` |
+| `PaidPlanRequired` | 403 | `Forbidden` subclass: turning on a share link's insights, comments or reactions needs a paid Drive plan |
 | `QuotaExceeded` | 402 | Over the plan allowance; carries the credit figures when given |
 | `NotFound` | 404 | No such file, folder, share, or session |
 | `Gone` | 410 | Invite revoked, expired, or exhausted |

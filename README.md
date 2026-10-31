@@ -64,9 +64,11 @@ phrase is separate.**
 Identity and folders, file upload (single-shot and resumable chunked sessions),
 streaming download, listing, directory browse, cross-folder search, account
 summaries, quota pre-flight, rename, and delete. File shares and folder shares
-mint a console link whose fragment is the decryption key. Shared drives let a
-second account join a folder with its own token; the member receives that
-folder's file key, and the owner's recovery phrase stays with the owner.
+mint a console link whose fragment is the decryption key. A file share's
+insights, comments and reactions can be read and switched on or off. Shared
+drives let a second account join a folder with its own token; the member
+receives that folder's file key, and the owner's recovery phrase stays with
+the owner.
 
 Listing endpoints are paged by the server: `browse` and `search` return at most
 200 entries per request (50 and 25 when no `limit` is given), so use

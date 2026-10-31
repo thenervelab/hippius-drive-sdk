@@ -89,6 +89,12 @@ not in `__all__` — the CLI and the quickstart both import it.
 | Mint a file-share link | `client.shares.create(path_or_bytes, FileShareSpec(filename))` — URL fragment is a fresh key |
 | Open a file share | `client.shares.open(share_url)` — anonymous; password links need `password=` |
 | List / revoke file shares | `client.shares.list()` / `client.shares.revoke(token)` |
+| A file share's switches | `row.settings` on `client.shares.list()`; change with `client.shares.update_settings(token, comments=True)` — on needs a paid Drive plan (`PaidPlanRequired`) |
+| A file share's views | `client.shares.insights(share_url_or_token)` — free plan: counts + `locked`; viewer names only from a URL |
+| Read a file share's comments | `client.shares.comments(share_url)` — decrypted; `text=None` when one will not open |
+| Comment / delete a comment | `client.shares.post_comment(share_url, text)` (anonymous) / `client.shares.delete_comment(token, id)` |
+| Reaction counts | `client.shares.reactions(token)` |
+| Rebuild your share's URL | `client.shares.recover_url(token, master_phrase)` — needs the owner wrap the console stores |
 | Mint a folder-share link | `client.folder_shares.create(FolderShareSpec(prefix, name))` — fragment is the drive file key |
 | Revoke a folder share | `client.folder_shares.revoke(token_or_hash)` — list returns `token_hash` only |
 | Invite someone to this drive | `client.drives.create_invite(InviteSpec(folder_mnemonic, role="writer"))` — a `#i=` link when the server advertises `drive_invite_link_envelopes`, else `#k=` |
@@ -158,13 +164,14 @@ is `ValueError`, raised locally.
 | `Unauthorized` | 401 — token missing, malformed, or rejected |
 | `Forbidden` | 403 — token resolves to a different account than the request names |
 | `MemberLimitReached` | 403 `drive_member_limit_reached` — a `Forbidden` subclass; the drive is full, the invite stays live, retry later. Carries `member_limit` |
+| `PaidPlanRequired` | 403 `paid_plan_required` — a `Forbidden` subclass; turning on share insights, comments or reactions on the Free Drive plan. Upgrade, then retry |
 | `QuotaExceeded` | 402 — over plan/credits; may carry `balance_cents` / `required_cents` |
 | `NotFound` | 404 — no such file, folder, share, or session. An empty 404 is still `NotFound` |
 | `Gone` | 410 — invite revoked, expired, or exhausted |
 | `Conflict` | 409 — stale `base_revision_id` |
 | `PayloadTooLarge` | 413 — a multipart field exceeded its cap |
 | `RateLimited` | 429 — back off; may carry `retry_after` |
-| `ServerError` | 5xx — retryable |
+| `ServerError` | 5xx — retryable. `code == "billing_unavailable"`: the plan source did not answer |
 | `TransportError` | no HTTP response (DNS/TLS/connect/timeout) |
 | `DecryptError` | blob malformed or tag fails; not retryable |
 | `InvalidRequest` | 400 |
@@ -206,6 +213,11 @@ hippius-drive ls --all                      # includes rows with no plaintext pa
 hippius-drive mv work/a.pdf archive/a.pdf   # looks up the revision for you
 hippius-drive rm work/a.pdf
 hippius-drive share put report.pdf --name report.pdf
+hippius-drive share settings TOKEN --comments on   # paid Drive plan
+hippius-drive share insights TOKEN
+hippius-drive share comments --url-file F         # or HIPPIUS_SHARE_URL; TOKEN alone for your own console link
+hippius-drive share comment-post "text" --url-file F
+hippius-drive share reactions TOKEN
 hippius-drive folder-share put --prefix work --name Work
 hippius-drive invite put --role writer --days 7
 hippius-drive drives join --invite-file F   # or HIPPIUS_INVITE_URL; never the URL in argv
@@ -286,8 +298,9 @@ secrets are present. Fork PRs skip e2e. The required check is the `ci` job.
 | `identity.py` | Account + per-folder keys; member role; ToS / rename signing text |
 | `models.py` | Pydantic wire types; byte fields as JSON int arrays |
 | `errors.py` | `DriveError` tree, including `Gone` |
-| `crypto/` | Hashes, KDF, framed cipher, mnemonic-at-rest, share links, owner wrap, grants |
+| `crypto/` | Hashes, KDF, framed cipher, mnemonic-at-rest, share links, owner wrap, grants, share comments |
 | `_links.py` | Share and invite specs, URL finish, grant open. Re-exported specs are public |
+| `_share_insights.py` | File-share settings, insights, comments: bodies, capability checks, decrypt |
 | `_namespaces.py` | Sync and async namespace objects. Not subclasses of each other |
 | `_ops.py` | One `Op` (request + parser) per endpoint |
 | `_wire.py` | Sans-I/O requests and envelope parsing |
@@ -330,6 +343,11 @@ inject it as `transport=`.
    `limit` down to 200.
 8. **Do not guess `revision_seq`.**
 9. **Warnings are errors** (`filterwarnings = ["error"]` in pytest).
+
+Share comment vectors: `tests/vectors/share-comments-vectors.json` is the
+console's `src/lib/files/share/insights/share-comments-vectors.json`, copied
+byte-identical (the desktop replays the same file). Update it by copying, not
+editing; `tests/crypto/test_comments.py` replays it.
 
 Known-answer vectors: `tests/vectors/hcfs-vectors-v1.json` is produced by
 hcfs (`HCFS_WRITE_VECTORS=1 cargo test -p hcfs-client --test export_sdk_vectors`)
