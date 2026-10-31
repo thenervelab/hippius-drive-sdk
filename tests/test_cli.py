@@ -19,6 +19,7 @@ from hippius_drive.cli import main
 from hippius_drive.client import Client
 from hippius_drive.crypto import (
     file_cipher,
+    folder_link,
     grant,
     hashes,
     invite_link,
@@ -28,6 +29,9 @@ from hippius_drive.crypto import (
 )
 from hippius_drive.identity import Identity
 from tests.helpers import manifest_from, multipart_parts
+
+if sys.platform == "win32":
+    import _winapi
 
 BASE = "https://example.test"
 MASTER = " ".join(["abandon"] * 23 + ["art"])
@@ -930,9 +934,11 @@ def test_share_ls_omits_the_owner_wrap_and_rm_revokes(env: dict[str, str]) -> No
 
 
 @respx.mock
-def test_folder_share_put_prints_the_drive_file_key(env: dict[str, str]) -> None:
+def test_folder_share_put_prints_a_link_secret_url(env: dict[str, str]) -> None:
     respx.post(f"{BASE}/v1/folder-shares").mock(
-        return_value=httpx.Response(201, json={"share_token": "fold", "expires_at": "later"})
+        return_value=httpx.Response(
+            201, json={"share_token": "fold", "expires_at": "later", "link_envelope": True}
+        )
     )
     result = run(
         [
@@ -949,11 +955,17 @@ def test_folder_share_put_prints_the_drive_file_key(env: dict[str, str]) -> None
     )
     assert result.exit_code == 0, result.output
     url = result.output.strip()
-    assert url.startswith("https://console.example/share/folder/fold#k=")
+    assert url.startswith("https://console.example/share/folder/fold#s=")
     parsed = sharing.parse_share_url(url)
     assert parsed.folder
-    assert parsed.secret.material == key()
+    assert parsed.secret.link_secret
+    assert parsed.secret.material != key()
     body = json.loads(respx.calls.last.request.content)
+    envelope = base64.b64decode(body["link_envelope"])
+    assert folder_link.open_envelope(parsed.secret.material, envelope) == key()
+    assert base64.b64decode(body["link_fetch_digest"]) == folder_link.fetch_digest(
+        parsed.secret.material
+    )
     assert body["path_prefix"] == "work"
     assert body["display_name"] == "Work"
     assert body["ttl"] == "24h"
@@ -1894,6 +1906,30 @@ def test_put_recursive_skips_symlinks_and_names_them(env: dict[str, str], tmp_pa
     assert "link.txt" in result.stderr
     assert "linkdir" in result.stderr
     assert "uploaded 3, replaced 0" in result.output
+
+
+@respx.mock
+def test_put_recursive_skips_windows_junctions(env: dict[str, str], tmp_path: Path) -> None:
+    if sys.platform != "win32":
+        pytest.skip("directory junctions exist only on Windows")
+    _state_with([])
+    upload = respx.post(f"{BASE}/upload").mock(return_value=httpx.Response(200, json=UPLOADED))
+    _dirs_route()
+    src = _tree(tmp_path)
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "x.txt").write_bytes(b"outside")
+    # One junction loops back into the tree, one leads out of it.
+    _winapi.CreateJunction(str(src / "sub"), str(src / "loop"))
+    _winapi.CreateJunction(str(tmp_path / "elsewhere"), str(src / "out"))
+    result = run(["put", "-r", str(src), "backup"], env)
+    assert result.exit_code == 0, result.output
+    assert set(_uploaded_paths(upload)) == {
+        "backup/a.txt",
+        "backup/sub/b.txt",
+        "backup/sub/deep/c.txt",
+    }
+    assert "loop (not a regular file" in result.stderr
+    assert "out (not a regular file" in result.stderr
 
 
 @respx.mock

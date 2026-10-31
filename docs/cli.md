@@ -165,9 +165,10 @@ reported on stderr and not uploaded, the other files still are, and the command
 exits 3 at the end; `--overwrite` replaces each one by compare-and-swap. Any
 other error (quota, auth, network after retries) stops at that file with exit
 code 1: it would fail every remaining file too. Files uploaded before the stop
-stay, so rerun with `sync` to finish. Symlinks and other non-regular files are
-skipped and named on stderr; they are never followed. A local directory with
-nothing to upload below it is created remotely, as `mkdir` would.
+stay, so rerun with `sync` to finish. Symlinks, Windows directory junctions and
+other non-regular files are skipped and named on stderr; they are never
+followed. A local directory with nothing to upload below it is created
+remotely, as `mkdir` would.
 
 `sync` is one way, local to remote, and keeps no state between runs. It lists
 the remote folder once and compares each local file's content hash with the
@@ -179,8 +180,8 @@ the desktop app, which keeps the history a two-way sync needs.
 Remote files are deleted only with `--delete`, and only those under the remote
 directory with no local file at the same path. Each delete quotes the revision
 the listing showed, so a file edited after the listing stays. Remote files at
-or below a skipped local path (a symlink) are kept. Remote empty directories
-are not deleted.
+or below a skipped local path (a symlink or junction) are kept. Remote empty
+directories are not deleted.
 
 Whatever someone else does between the listing and the write is left alone:
 a file created or edited in that window is reported on stderr, the rest
@@ -252,10 +253,11 @@ hippius-drive folder-share ls
 hippius-drive folder-share rm TOKEN                          # token or 64-hex token_hash
 ```
 
-`share put` and `folder-share put` print one console URL. That URL is the
-decryption key. `--console` changes the origin; it defaults to
+`share put` and `folder-share put` print one console URL. That URL opens
+the content for anyone who holds it; treat it as a secret. `--console` changes the origin; it defaults to
 `https://console.hippius.com` and is separate from `--server`. A `--password`
-of at least 8 characters produces a `#p=` link.
+of at least 8 characters produces a `#p=` file link or a `#sp=` folder link.
+A folder link without a password is `#s=`.
 
 File-share `ls` prints the plaintext token. Folder-share `ls` prints
 `token_hash`, because the listing does not contain the token.

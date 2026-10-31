@@ -13,8 +13,8 @@ import os
 
 import pytest
 
-from hippius_drive import Client, FileShareSpec, Identity, InviteSpec, errors
-from hippius_drive.crypto import kdf
+from hippius_drive import Client, FileShareSpec, FolderShareSpec, Identity, InviteSpec, errors
+from hippius_drive.crypto import kdf, sharing
 
 pytestmark = pytest.mark.e2e
 
@@ -42,6 +42,34 @@ def test_file_share_round_trip_and_revoke(client: Client) -> None:
     finally:
         if created is not None:
             client.shares.revoke(created.share_token)
+
+
+@pytest.mark.parametrize("password", [None, "e2e-folder-link-pw"])
+def test_folder_share_link_secret_round_trip_and_revoke(
+    client: Client, password: str | None
+) -> None:
+    # One folder per case: the session fixture shares one drive, and a second
+    # put to the same path without a base revision is a 409.
+    prefix = "e2e-folder-share-pw" if password else "e2e-folder-share"
+    client.files.put_bytes(_PAYLOAD, f"{prefix}/a.txt")
+    spec = FolderShareSpec(prefix, "SDK e2e", password=password)
+    created = client.folder_shares.create(spec)
+    try:
+        secret = sharing.parse_share_url(created.share_url).secret
+        assert secret.link_secret, "the server refuses links that carry the drive key"
+        page = client.folder_shares.browse(created.share_url, password=password)
+        assert [entry.name for entry in page.files] == ["a.txt"]
+        data = client.folder_shares.get(created.share_url, "a.txt", password=password)
+        assert data == _PAYLOAD
+        listed = [row for row in client.folder_shares.list() if row.revoked_at is None]
+        assert any(row.path_prefix == prefix for row in listed)
+        client.folder_shares.revoke(created.share_token)
+        with pytest.raises(errors.NotFound):
+            client.folder_shares.get(created.share_url, "a.txt", password=password)
+        created = None
+    finally:
+        if created is not None:
+            client.folder_shares.revoke(created.share_token)
 
 
 @pytest.mark.skipif(
