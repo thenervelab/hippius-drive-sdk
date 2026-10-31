@@ -74,7 +74,8 @@ Listing endpoints are paged by the server: `browse` and `search` return at most
 `has_more`, never on `total_count`. A search term shorter than 3 characters
 returns no hits by server policy: an empty page, not an error.
 
-**Not in v1:** the sync engine, recovery bindings, mnemonic-blob server
+**Not in v1:** the two-way sync engine of the desktop app (the CLI has a
+one-way `sync`, see [docs/cli.md](docs/cli.md#directories)), recovery bindings, mnemonic-blob server
 endpoints, admin endpoints, and S3-gateway variants. The `crypto/` module does
 implement both mnemonic-at-rest formats (the desktop `enc_mnemonic.json` and
 the console's Argon2id sealed blob), since the CLI needs the first and

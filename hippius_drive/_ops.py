@@ -7,7 +7,7 @@ it. An :class:`Op` is inert; nothing happens until a transport runs it.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
@@ -18,12 +18,14 @@ from hippius_drive._upload import TRANSPORT_CHUNK, PreparedUpload
 from hippius_drive._wire import Request, build
 from hippius_drive.crypto import hashes, kdf
 from hippius_drive.identity import Identity, rename_text
-from hippius_drive.models import BrowseOptions, SearchFilters
+from hippius_drive.models import (
+    MAX_BATCH_DELETE,
+    MAX_FOLDER_ENTRIES_BATCH,
+    BrowseOptions,
+    SearchFilters,
+)
 
 T = TypeVar("T")
-
-MAX_BATCH_DELETE = 1000
-"""Server cap on ``/delete_files`` (``MAX_BATCH_DELETE_FILES``)."""
 
 
 @dataclass(frozen=True)
@@ -135,10 +137,6 @@ def health() -> Op[models.HealthResult]:
         The operation.
     """
     return Op(build.health(), _parser(models.HealthResult))
-
-
-MAX_FOLDER_ENTRIES_BATCH = 500
-"""Directory paths one ``/register_folder_entries`` request may carry."""
 
 
 def register_folder_entries(
@@ -372,7 +370,10 @@ def delete_file(identity: Identity, file_id: str) -> Op[models.DeleteResult]:
 
 
 def delete_files(
-    identity: Identity, file_ids: list[str], quiet: bool = False
+    identity: Identity,
+    file_ids: list[str],
+    quiet: bool = False,
+    expected_revisions: Mapping[str, bytes] | None = None,
 ) -> Op[models.BatchDeleteResult]:
     """Remove up to 1000 files in one transaction.
 
@@ -380,6 +381,9 @@ def delete_files(
         identity: The account and folder identity.
         file_ids: Hex path hashes to remove.
         quiet: Omit successful entries from the response.
+        expected_revisions: ``file_id`` to the ``revision_id`` the caller means
+            to delete. A listed file that has moved past it stays, reported in
+            ``errors`` with code ``conflict``; unlisted ids delete unconditionally.
 
     Returns:
         The operation.
@@ -392,7 +396,9 @@ def delete_files(
     if len(file_ids) > MAX_BATCH_DELETE:
         raise ValueError(f"batch delete takes at most {MAX_BATCH_DELETE} ids, got {len(file_ids)}")
     return Op(
-        build.delete_files(identity.account_ss58, identity.folder_hash, file_ids, quiet),
+        build.delete_files(
+            identity.account_ss58, identity.folder_hash, file_ids, quiet, expected_revisions
+        ),
         _parser(models.BatchDeleteResult),
     )
 
