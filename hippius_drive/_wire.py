@@ -893,6 +893,23 @@ class RequestBuilders:
         return _capability("GET", f"/v1/folder-shares/{_token(token)}/meta", anonymous=True)
 
     @staticmethod
+    def folder_link_key(token: str, proof: str) -> Request:
+        """Build anonymous ``GET /v1/folder-shares/{token}/link-key``.
+
+        Args:
+            token: The plaintext folder-share token.
+            proof: Unpadded base64url of the link secret's fetch key. A header,
+                so it stays out of access logs.
+        """
+        return Request(
+            "GET",
+            f"/v1/folder-shares/{_token(token)}/link-key",
+            headers={"x-hcfs-link-proof": proof},
+            authenticated=False,
+            redact_url=True,
+        )
+
+    @staticmethod
     def folder_share_browse(token: str, path: str, offset: int, limit: int | None) -> Request:
         """Build anonymous ``GET /v1/folder-shares/{token}/browse``.
 

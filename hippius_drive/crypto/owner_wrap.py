@@ -34,6 +34,10 @@ _TAG_LEN = 16
 _KEY_LEN = 32
 _FLAG_PRIVATE = 0x01
 _FLAG_FOLDER_TOKEN = 0x02
+# A folder link secret (#s= / #sp=), not a key. Valid only with a folder
+# token. A decoder that predates it rejects the wrap, so an old device cannot
+# rebuild a #k= URL out of a link secret.
+_FLAG_LINK_SECRET = 0x04
 _MAX_FOLDER_TOKEN = 64
 _MIN_LEN = 1 + _NONCE_LEN + _TAG_LEN
 _BIP39 = Mnemonic("english")
@@ -70,7 +74,12 @@ def seal_file_secret(
 
     Returns:
         ``version || nonce || ciphertext``.
+
+    Raises:
+        ValueError: If ``secret`` is a folder link secret.
     """
+    if secret.link_secret:
+        raise ValueError("a folder link secret cannot be sealed as a file share")
     spec = _Seal(master_mnemonic, owner_ss58, share_token, secret, None, nonce)
     return _seal(spec)
 
@@ -202,6 +211,8 @@ def _encode(secret: ShareSecret, folder_token: str | None) -> bytes:
     flags = 0
     if secret.private:
         flags |= _FLAG_PRIVATE
+    if secret.link_secret:
+        flags |= _FLAG_LINK_SECRET
     token_bytes = b""
     if folder_token is not None:
         flags |= _FLAG_FOLDER_TOKEN
@@ -216,7 +227,9 @@ def _decode(plaintext: bytes) -> tuple[str | None, ShareSecret]:
     if not plaintext:
         raise DecryptError("owner wrap did not open")
     flags = plaintext[0]
-    if flags & ~(_FLAG_PRIVATE | _FLAG_FOLDER_TOKEN):
+    if flags & ~(_FLAG_PRIVATE | _FLAG_FOLDER_TOKEN | _FLAG_LINK_SECRET):
+        raise DecryptError("owner wrap did not open")
+    if flags & _FLAG_LINK_SECRET and not flags & _FLAG_FOLDER_TOKEN:
         raise DecryptError("owner wrap did not open")
     rest = plaintext[1:]
     token: str | None = None
@@ -243,4 +256,4 @@ def _take_secret(flags: int, secret_bytes: bytes) -> ShareSecret:
     expected = SHARE_WRAP_BLOB_LEN if private else _KEY_LEN
     if len(secret_bytes) != expected:
         raise DecryptError("owner wrap did not open")
-    return ShareSecret(secret_bytes, private=private)
+    return ShareSecret(secret_bytes, private=private, link_secret=bool(flags & _FLAG_LINK_SECRET))

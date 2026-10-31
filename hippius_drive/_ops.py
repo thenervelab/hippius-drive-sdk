@@ -695,6 +695,16 @@ def folder_share_meta(token: str) -> Op[models.FolderShareMeta]:
     return Op(build.folder_share_meta(token), _parser(models.FolderShareMeta))
 
 
+def folder_link_key(token: str, proof: str) -> Op[models.FolderLinkKey]:
+    """Fetch a ``#s=`` folder link's envelope. A bodiless 404 covers every refusal.
+
+    Args:
+        token: The plaintext folder-share token.
+        proof: The ``x-hcfs-link-proof`` header value.
+    """
+    return Op(build.folder_link_key(token, proof), _parser(models.FolderLinkKey))
+
+
 def folder_share_browse(
     token: str, path: str = "", offset: int = 0, limit: int | None = None
 ) -> Op[models.FolderSharePage]:
