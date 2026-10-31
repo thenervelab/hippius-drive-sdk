@@ -433,8 +433,9 @@ class ShareOps:
         Each call stores one more moment, so it is never retried. It also
         adds the reaction, as :meth:`react` does. :meth:`unreact` takes the
         reaction and all its moments back; one moment cannot be removed.
-        Past 200 moments on the link, or 5,000 in all, it is ``Conflict``
-        ``moment-limit``.
+        Once the link holds 5,000 moments, or this account holds 200 on it
+        (all emoji together), it is ``Conflict`` ``moment-limit`` and nothing
+        is stored, not even the reaction.
 
         Args:
             token: The plaintext share token.

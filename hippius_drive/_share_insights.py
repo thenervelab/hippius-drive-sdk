@@ -23,6 +23,21 @@ from hippius_drive.models import (
     ShareSummary,
 )
 
+REACTIONS = (
+    "\U0001f44d",
+    "\u2764\ufe0f",
+    "\U0001f602",
+    "\U0001f62e",
+    "\U0001f389",
+    "\U0001f44f",
+    "\U0001f525",
+    "\U0001f64c",
+)
+"""The reactions a link takes, in the order the share page shows them (hcfs ``REACTIONS``)."""
+
+MAX_MOMENT_MS = 604_800_000
+"""Seven days: the longest a view may report, and the latest moment hcfs takes."""
+
 
 def require_insights(caps: Capabilities) -> None:
     """Stop before a request the server would answer with a bodiless 404.
@@ -72,22 +87,6 @@ def require_listing_counts(caps: Capabilities) -> None:
         )
 
 
-REACTIONS = (
-    "\U0001f44d",
-    "\u2764\ufe0f",
-    "\U0001f602",
-    "\U0001f62e",
-    "\U0001f389",
-    "\U0001f44f",
-    "\U0001f525",
-    "\U0001f64c",
-)
-"""The reactions a link takes, in the order the share page shows them (hcfs ``REACTIONS``)."""
-
-MAX_MOMENT_MS = 604_800_000
-"""Seven days: the longest a view may report, and the latest moment hcfs takes."""
-
-
 def check_reaction(emoji: str) -> str:
     """The reaction as the server stores it. A heart without U+FE0F is the same heart.
 
@@ -101,15 +100,15 @@ def check_reaction(emoji: str) -> str:
     return emoji
 
 
-def check_moment(at_ms: int) -> int:
+def check_moment(at_ms: int) -> None:
     """Refuse a moment the server would refuse.
 
     Raises:
-        ValueError: If ``at_ms`` is outside 0 to seven days.
+        ValueError: If ``at_ms`` is not a whole number from 0 to seven days.
     """
-    if not 0 <= at_ms <= MAX_MOMENT_MS:
+    # bool is an int subclass: True would go out as {"at_ms": true}, a 400.
+    if isinstance(at_ms, bool) or not 0 <= at_ms <= MAX_MOMENT_MS:
         raise ValueError(f"at_ms must be from 0 to {MAX_MOMENT_MS} (seven days)")
-    return at_ms
 
 
 def settings_body(

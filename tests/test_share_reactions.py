@@ -100,13 +100,37 @@ async def test_react_puts_the_percent_encoded_emoji_with_no_body(mode: str) -> N
 @respx.mock
 @pytest.mark.anyio
 @MODES
-async def test_a_bare_heart_is_sent_as_the_heart_the_server_stores(mode: str) -> None:
+@pytest.mark.parametrize(("method", "args"), [("react", ()), ("unreact", ()), ("react_at", (5,))])
+async def test_a_bare_heart_is_sent_as_the_heart_the_server_stores(
+    mode: str, method: str, args: tuple[int, ...]
+) -> None:
     _capabilities(**ALL_ON)
-    route = respx.put(url__regex=rf"{SHARE}/reactions/.+").mock(return_value=httpx.Response(204))
+    route = respx.route(url__regex=rf"{SHARE}/reactions/.+").mock(return_value=httpx.Response(204))
 
-    await _on_shares(mode, lambda s: s.react(TOKEN, "❤"))
+    await _on_shares(mode, lambda s: getattr(s, method)(TOKEN, "\u2764", *args))
 
-    assert _path(route.calls.last.request).endswith("/reactions/%E2%9D%A4%EF%B8%8F")
+    assert "/reactions/%E2%9D%A4%EF%B8%8F" in _path(route.calls.last.request)
+
+
+@respx.mock
+@pytest.mark.anyio
+@MODES
+@pytest.mark.parametrize(("method", "args"), [("react", ()), ("react_at", (5,))])
+async def test_a_rate_limited_reaction_is_not_retried(
+    mode: str, method: str, args: tuple[int, ...]
+) -> None:
+    _capabilities(**ALL_ON)
+    route = respx.route(url__regex=rf"{SHARE}/reactions/.+").mock(
+        return_value=httpx.Response(
+            429, json={"error": "rate_limited"}, headers={"Retry-After": "60"}
+        )
+    )
+
+    with pytest.raises(errors.RateLimited) as caught:
+        await _on_shares(mode, lambda s: getattr(s, method)(TOKEN, THUMBS, *args))
+
+    assert caught.value.retry_after == 60
+    assert route.call_count == 1
 
 
 @respx.mock
@@ -223,7 +247,7 @@ async def test_the_moment_limit_is_a_conflict(mode: str) -> None:
 @respx.mock
 @pytest.mark.anyio
 @MODES
-@pytest.mark.parametrize("at_ms", [-1, 604_800_001])
+@pytest.mark.parametrize("at_ms", [-1, 604_800_001, True])
 async def test_a_moment_outside_seven_days_fails_before_any_request(mode: str, at_ms: int) -> None:
     caps = _capabilities(**ALL_ON)
 
