@@ -389,7 +389,7 @@ def open_comment(key: bytes, token: str, ciphertext: str, nonce: str) -> Comment
         nonce: Standard base64 from the listing.
 
     Returns:
-        The text and the cleaned name.
+        The text, the cleaned name, and the mentions that parse.
 
     Raises:
         DecryptError: If it does not open under this key and link, or is not

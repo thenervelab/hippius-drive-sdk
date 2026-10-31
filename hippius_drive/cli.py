@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -33,7 +34,7 @@ from hippius_drive import (
 from hippius_drive import auth as api_auth
 from hippius_drive._config import Config
 from hippius_drive.client import Client
-from hippius_drive.crypto import kdf, mnemonic_store, sharing
+from hippius_drive.crypto import comments, kdf, mnemonic_store, sharing
 from hippius_drive.crypto.comments import VIEWER_SECRET_LEN, CommentMention, mention_wire
 from hippius_drive.identity import Identity
 from hippius_drive.models import (
@@ -60,6 +61,9 @@ ENV_INVITE_URL = "HIPPIUS_INVITE_URL"
 
 ENV_SHARE_URL = "HIPPIUS_SHARE_URL"
 """Environment variable the share comment and insights commands read a link from."""
+
+_VIEWER_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+"""The console's stored form: 32 bytes of unpadded base64url."""
 
 VIEWER_SECRET_FILE = "viewer-secret"  # noqa: S105 - a file name, not a secret
 """File beside the mnemonic file holding the secret named comments derive a viewer id from."""
@@ -930,6 +934,10 @@ def share_comment_post(
     A named comment is counted in the owner's insights under a viewer id
     derived from a secret kept in ``viewer-secret`` beside the mnemonic file.
     """
+    if name is not None and comments.clean_name(comments.present_name(name)) is None:
+        raise click.ClickException(
+            "--name is blank: give a name, or leave it out to post anonymously"
+        )
     if text == "-":
         text = sys.stdin.read()
     with obj.client() as client:
@@ -1355,34 +1363,40 @@ def _viewer_secret(obj: Context) -> bytes:
     """This install's viewer secret, made on first use: the console's per-browser secret.
 
     32 random bytes, unpadded base64url as the console stores it, in an
-    owner-only file beside the mnemonic file. Created with O_EXCL, so two
-    commands racing on first use keep one secret.
+    owner-only file beside the mnemonic file.
     """
     path = obj.config.mnemonic_file.parent / VIEWER_SECRET_FILE
     _create_viewer_secret(path)
     raw = _read_secret(path)
-    try:
-        secret = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
-    except ValueError as exc:
-        raise click.ClickException(f"{path} is not a viewer secret; delete it") from exc
-    if len(secret) != VIEWER_SECRET_LEN:
+    if not _VIEWER_SECRET_RE.fullmatch(raw):
         raise click.ClickException(f"{path} is not a viewer secret; delete it")
-    return secret
+    return base64.urlsafe_b64decode(raw + "=")
 
 
 def _create_viewer_secret(path: Path) -> None:
-    """Write a fresh secret at ``path`` unless something is already there."""
+    """Put a fresh secret at ``path`` unless something is already there.
+
+    The secret is written to a temporary file first and then hard-linked
+    into place, which fails if ``path`` exists. A reader therefore sees
+    either no file or a whole secret, and two commands racing on first use
+    both end up with the one that was linked first.
+    """
     value = base64.urlsafe_b64encode(os.urandom(VIEWER_SECRET_LEN)).decode().rstrip("=")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(path, flags, 0o600)
-    except FileExistsError:
-        return
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".viewer-secret-")
     except OSError as exc:
         raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(value + "\n")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+        os.link(tmp, path)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise click.ClickException(f"cannot write {path}: {exc.strerror}") from exc
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def _viewer_names(

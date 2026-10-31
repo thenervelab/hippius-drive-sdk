@@ -983,7 +983,10 @@ class CommentAuthor:
 
     def __post_init__(self) -> None:
         """Refuse a secret of the wrong size before anything is sealed."""
-        if len(self.viewer_secret) != VIEWER_SECRET_LEN:
+        if (
+            not isinstance(self.viewer_secret, bytes)
+            or len(self.viewer_secret) != VIEWER_SECRET_LEN
+        ):
             raise ValueError(f"viewer_secret must be {VIEWER_SECRET_LEN} bytes")
 
 

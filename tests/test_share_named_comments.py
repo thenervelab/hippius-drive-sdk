@@ -16,7 +16,7 @@ import httpx
 import pytest
 import respx
 
-from hippius_drive import CommentAuthor, CommentMention, ShareInsights
+from hippius_drive import CommentAuthor, CommentMention, ShareInsights, errors
 from hippius_drive._links import DEFAULT_CONSOLE
 from hippius_drive._transport import AsyncTransport, Transport
 from hippius_drive.client import AsyncClient, Client
@@ -177,6 +177,8 @@ async def test_a_blank_name_is_refused_before_any_request(mode: str) -> None:
 def test_an_author_needs_a_32_byte_secret() -> None:
     with pytest.raises(ValueError, match="32 bytes"):
         CommentAuthor("Grace", bytes(16))
+    with pytest.raises(ValueError, match="32 bytes"):
+        CommentAuthor("Grace", "x" * 32)  # ty: ignore[invalid-argument-type] - the wrong type is the test
     assert "viewer_secret" not in repr(GRACE)
 
 
@@ -350,7 +352,8 @@ async def test_viewer_names_show_as_the_console_shows_them(mode: str) -> None:
 
 def _candidates_thread() -> None:
     _thread(
-        _row("41", "a", name="Ada"),
+        # Edited order: 41 is Ada's newest comment though 43 has the higher id.
+        _row("41", "a", name="Ada", created_at="2026-10-13T10:00:59Z"),
         _row("42", "b", name="Bo", mine=True),
         _row("43", "c", name="Ada"),
         _row("44", "d"),
@@ -373,12 +376,13 @@ async def test_a_viewer_is_offered_the_owner_first_then_named_commenters(mode: s
 
     found = await _on_shares(mode, lambda s: s.mention_candidates(URL))
 
-    # Newest first, one per name pointing at their newest comment; not your
-    # own, not anonymous, not unreadable; nobody under the owner's name.
+    # Newest first by created_at, one per name pointing at their newest
+    # comment; not your own, not anonymous, not unreadable; nobody under the
+    # owner's name.
     assert list(found) == [
         CommentMention("owner", "Dee"),
+        CommentMention("commenter", "Ada", "41"),
         CommentMention("commenter", "Eve", "48"),
-        CommentMention("commenter", "Ada", "43"),
     ]
 
 
@@ -393,9 +397,9 @@ async def test_the_owner_is_offered_commenters_only(mode: str) -> None:
     found = await _on_shares(mode, lambda s: s.mention_candidates(URL))
 
     assert list(found) == [
+        CommentMention("commenter", "Ada", "41"),
         CommentMention("commenter", "Eve", "48"),
         CommentMention("commenter", "Dee", "47"),
-        CommentMention("commenter", "Ada", "43"),
     ]
 
 
@@ -410,3 +414,71 @@ async def test_an_owner_who_never_commented_by_name_is_offered_as_owner(mode: st
     found = await _on_shares(mode, lambda s: s.mention_candidates(URL))
 
     assert list(found) == [OWNER, ADA]
+
+
+@respx.mock
+@pytest.mark.anyio
+@MODES
+@pytest.mark.parametrize(
+    ("picks", "error"),
+    [
+        ([CommentMention("Commenter", "Ada", "41")], "kind must be owner or commenter"),  # ty: ignore[invalid-argument-type] - the wrong type is the test
+        ([CommentMention("commenter", " Ada", "41")], "is not clean"),
+        ([CommentMention("commenter", "Ada", str(i)) for i in range(1, 12)], "at most 10"),
+    ],
+)
+async def test_picks_that_would_be_dropped_are_refused(
+    mode: str, picks: list[CommentMention], error: str
+) -> None:
+    caps = _capabilities()
+
+    with pytest.raises(ValueError, match=error):
+        await _on_shares(mode, lambda s: s.post_comment(URL, "hi @ Ada @Ada", mentions=picks))
+
+    assert not caps.called
+
+
+@respx.mock
+@pytest.mark.anyio
+@MODES
+async def test_owner_mentions_stay_unmarked_when_the_listing_is_refused(mode: str) -> None:
+    _capabilities()
+    _thread(_row("41", "@Owner hi", name="Bo", mentions=[OWNER]))
+    respx.get(f"{BASE}/v1/shares").mock(
+        return_value=httpx.Response(403, json={"error": "account_suspended"})
+    )
+
+    found = await _on_shares(mode, lambda s: s.comments(URL))
+
+    assert (found[0].text, found[0].mentions_me) == ("@Owner hi", False)
+
+
+@respx.mock
+@pytest.mark.anyio
+@MODES
+async def test_other_listing_failures_still_fail_the_read(mode: str) -> None:
+    _capabilities()
+    _thread(_row("41", "@Owner hi", name="Bo", mentions=[OWNER]))
+    respx.get(f"{BASE}/v1/shares").mock(return_value=httpx.Response(401))
+
+    with pytest.raises(errors.Unauthorized):
+        await _on_shares(mode, lambda s: s.comments(URL))
+
+
+@respx.mock
+@pytest.mark.anyio
+@MODES
+async def test_an_owner_who_commented_is_known_from_the_thread_alone(mode: str) -> None:
+    _capabilities()
+    _thread(
+        _row("41", "mine", name="Dee", owner=True, mine=True),
+        _row("42", "@Dee hi", name="Bo", mentions=[CommentMention("owner", "Dee")]),
+    )
+    listing = _listing()
+
+    found = await _on_shares(mode, lambda s: s.comments(URL))
+    offered = await _on_shares(mode, lambda s: s.mention_candidates(URL))
+
+    assert found[1].mentions_me is True
+    assert list(offered) == [CommentMention("commenter", "Bo", "42")]
+    assert not listing.called

@@ -316,18 +316,27 @@ class ShareOps:
 
         Returns:
             Comments and replies; group replies by ``parent_id``. A comment
-            that tags this account has ``mentions_me``; when one tags the
-            owner, the share listing is read once to tell if that is you.
+            that tags this account has ``mentions_me``. When one tags the
+            owner and the thread does not show whether you are the owner,
+            the share listing is read once to tell; if this account may not
+            list shares (``Forbidden``), owner mentions are left unmarked.
 
         Raises:
             ValueError: If the server has ``share_comments`` off.
         """
         token, key = _share_insights.link_key(share_url, password)
         thread = self._thread(token, key)
-        owns = _share_insights.mentions_owner(thread) and _share_insights.owns_link(
-            self.list(), token
-        )
+        owns = _share_insights.mentions_owner(thread) and self._owns_or_unknown(thread, token)
         return _share_insights.mark_mentions(thread, reader_owns_link=owns)
+
+    def _owns_or_unknown(self, thread: Sequence[ShareComment], token: str) -> bool:
+        """Whether this account owns the link; False when it may not list its shares."""
+        if _share_insights.thread_shows_owner(thread):
+            return True
+        try:
+            return _share_insights.owns_link(self.list(), token)
+        except errors.Forbidden:
+            return False
 
     def mention_candidates(
         self, share_url: str, *, password: str | None = None
@@ -348,7 +357,9 @@ class ShareOps:
         """
         token, key = _share_insights.link_key(share_url, password)
         thread = self._thread(token, key)
-        owns = _share_insights.owns_link(self.list(), token)
+        owns = _share_insights.thread_shows_owner(thread) or _share_insights.owns_link(
+            self.list(), token
+        )
         return _share_insights.mention_candidates(thread, reader_owns_link=owns)
 
     def _thread(self, token: str, key: bytes) -> Sequence[ShareComment]:
@@ -400,7 +411,9 @@ class ShareOps:
             ValueError: For bad input, or a server without the needed capability.
         """
         token, key = _share_insights.link_key(share_url, password)
-        draft = _share_insights.CommentDraft(text, parent_id, at_ms, author, mentions)
+        draft = _share_insights.CommentDraft(
+            text=text, parent_id=parent_id, at_ms=at_ms, author=author, mentions=mentions
+        )
         body = _share_insights.comment_body(token, key, draft)
         caps = _links.capabilities_or_disabled(self._client.run)
         _share_insights.require_comments(caps)
@@ -985,10 +998,16 @@ class AsyncShareOps:
         """Async twin of :meth:`ShareOps.comments`."""
         token, key = _share_insights.link_key(share_url, password)
         thread = await self._thread(token, key)
-        owns = _share_insights.mentions_owner(thread) and _share_insights.owns_link(
-            await self.list(), token
-        )
+        owns = _share_insights.mentions_owner(thread) and await self._owns_or_unknown(thread, token)
         return _share_insights.mark_mentions(thread, reader_owns_link=owns)
+
+    async def _owns_or_unknown(self, thread: Sequence[ShareComment], token: str) -> bool:
+        if _share_insights.thread_shows_owner(thread):
+            return True
+        try:
+            return _share_insights.owns_link(await self.list(), token)
+        except errors.Forbidden:
+            return False
 
     async def mention_candidates(
         self, share_url: str, *, password: str | None = None
@@ -996,7 +1015,9 @@ class AsyncShareOps:
         """Async twin of :meth:`ShareOps.mention_candidates`."""
         token, key = _share_insights.link_key(share_url, password)
         thread = await self._thread(token, key)
-        owns = _share_insights.owns_link(await self.list(), token)
+        owns = _share_insights.thread_shows_owner(thread) or _share_insights.owns_link(
+            await self.list(), token
+        )
         return _share_insights.mention_candidates(thread, reader_owns_link=owns)
 
     async def _thread(self, token: str, key: bytes) -> Sequence[ShareComment]:
@@ -1025,7 +1046,9 @@ class AsyncShareOps:
     ) -> PostedComment:
         """Async twin of :meth:`ShareOps.post_comment`."""
         token, key = _share_insights.link_key(share_url, password)
-        draft = _share_insights.CommentDraft(text, parent_id, at_ms, author, mentions)
+        draft = _share_insights.CommentDraft(
+            text=text, parent_id=parent_id, at_ms=at_ms, author=author, mentions=mentions
+        )
         body = _share_insights.comment_body(token, key, draft)
         caps = await _links.capabilities_or_disabled_async(self._client.run)
         _share_insights.require_comments(caps)

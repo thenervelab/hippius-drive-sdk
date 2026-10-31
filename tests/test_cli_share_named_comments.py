@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import stat
@@ -146,7 +147,7 @@ def test_a_secret_other_users_can_read_is_refused(env: dict[str, str]) -> None:
 
 
 @respx.mock
-@pytest.mark.parametrize("content", ["short", "!!!!", ""])
+@pytest.mark.parametrize("content", ["short", "!!!!" + "A" * 43, "A" * 42 + "!", ""])
 def test_a_damaged_secret_is_refused_with_how_to_fix(env: dict[str, str], content: str) -> None:
     path = _secret_file(env)
     path.write_text(content)
@@ -220,4 +221,50 @@ def test_a_secret_that_cannot_be_written_says_where(env: dict[str, str]) -> None
 
     assert result.exit_code == 1
     assert f"cannot write {_secret_file(env)}" in result.output
+    assert not route.called
+
+
+@respx.mock
+def test_a_blank_name_is_refused_before_a_secret_is_made(env: dict[str, str]) -> None:
+    route = _posted()
+
+    result = run(["share", "comment-post", "hi", "--name", "  "], env)
+
+    assert result.exit_code == 1
+    assert "--name is blank" in result.output
+    assert not _secret_file(env).exists()
+    assert not route.called
+
+
+@respx.mock
+def test_an_existing_secret_is_kept_and_no_temporary_file_is_left(env: dict[str, str]) -> None:
+    path = _secret_file(env)
+    raw = base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("=")
+    path.write_text(raw + "\n")
+    os.chmod(path, 0o600)
+    route = _posted()
+
+    result = run(["share", "comment-post", "hi", "--name", "Grace"], env)
+
+    assert result.exit_code == 0
+    assert _sent(route)["viewer_id"] == comments.viewer_id(bytes(range(32)), TOKEN)
+    assert path.read_text() == raw + "\n"
+    assert sorted(p.name for p in path.parent.iterdir()) == ["enc_mnemonic.json", "viewer-secret"]
+
+
+@respx.mock
+def test_a_file_system_without_hard_links_says_so_and_cleans_up(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_links(_src: str, _dst: Path) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_links)
+    route = _posted()
+
+    result = run(["share", "comment-post", "hi", "--name", "Grace"], env)
+
+    assert result.exit_code == 1
+    assert f"cannot write {_secret_file(env)}: Operation not permitted" in result.output
+    assert sorted(p.name for p in _secret_file(env).parent.iterdir()) == ["enc_mnemonic.json"]
     assert not route.called

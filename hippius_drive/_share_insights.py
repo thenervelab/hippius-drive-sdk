@@ -236,13 +236,18 @@ def collect_mentions(text: str, picked: Sequence[CommentMention]) -> list[Commen
     longer wins. Duplicate picks count once.
 
     Raises:
-        ValueError: If a pick's ``@Name`` is nowhere in the text as a whole
-            word; the console drops such a pick, but here it is a caller's
-            mistake.
+        ValueError: If a pick has another kind, a name that is not clean
+            (it would be sealed changed and not read back as a tag), or no
+            whole-word ``@Name`` in the text, or there are more than ten
+            distinct picks. The console drops such a pick; here it is a
+            caller's mistake.
     """
     distinct = list(dict.fromkeys(picked))
+    if len(distinct) > comments.MAX_MENTIONS:
+        raise ValueError(f"a comment tags at most {comments.MAX_MENTIONS} people")
     found: list[tuple[int, int, CommentMention]] = []
     for mention in distinct:
+        _check_pick(mention)
         at = _find_tag(text, mention.name, 0)
         if at == -1:
             raise ValueError(f"@{mention.name} is not in the comment text")
@@ -261,6 +266,13 @@ def collect_mentions(text: str, picked: Sequence[CommentMention]) -> list[Commen
         if len(chosen) >= comments.MAX_MENTIONS:
             break
     return chosen
+
+
+def _check_pick(mention: CommentMention) -> None:
+    if mention.kind not in ("owner", "commenter"):
+        raise ValueError(f"mention kind must be owner or commenter, not {mention.kind!r}")
+    if comments.clean_name(mention.name) != mention.name:
+        raise ValueError(f"mention name {mention.name!r} is not clean: take it from the candidates")
 
 
 def _find_tag(text: str, name: str, start: int) -> int:
@@ -330,6 +342,11 @@ def _is_reader(mention: CommentMention, mine: set[str], reader_owns_link: bool) 
     if mention.kind == "owner":
         return reader_owns_link
     return mention.comment is not None and mention.comment in mine
+
+
+def thread_shows_owner(thread: Sequence[ShareComment]) -> bool:
+    """Whether the reader's own comments include the owner's: then the reader owns the link."""
+    return any(item.owner and item.mine for item in thread)
 
 
 def owns_link(rows: Sequence[ShareSummary], token: str) -> bool:

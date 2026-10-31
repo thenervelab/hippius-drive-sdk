@@ -250,9 +250,12 @@ access-key account's generated `user_<address>`, is posted shortened, as the
 console does.
 
 `--mention NAME` tags someone the comments offer: the owner (`owner` always
-names them) and everyone else who commented under a name. TEXT must contain
-`@` and that name. The tags are sealed inside the comment, so the server
-never learns who was tagged. `comments` adds `(mentions you)` to a comment
+names them) and everyone else who commented under a name. NAME is matched
+exactly as the comments show it, so a shortened address needs its `…`. TEXT
+must contain `@` and the name the comments show: for the owner that is the
+name of their newest named comment, or `Owner` until they have one. If no
+one matches, the error lists who is offered. The tags are sealed inside the
+comment, so the server never learns who was tagged. `comments` adds `(mentions you)` to a comment
 that tags you, and `--json` has `mentions` and `mentions_me`.
 Comment text and names come from anyone with the link. Plain output prints a
 name as a quoted string, so it cannot pass for the `[owner]` badge the server
