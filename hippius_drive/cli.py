@@ -13,10 +13,10 @@ import stat
 import sys
 import tempfile
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 
@@ -24,9 +24,11 @@ from hippius_drive import FileShareSpec, FolderShareSpec, InviteSpec, __version_
 from hippius_drive import auth as api_auth
 from hippius_drive._config import Config
 from hippius_drive.client import Client
-from hippius_drive.crypto import kdf, mnemonic_store, sharing
+from hippius_drive.crypto import hashes, kdf, mnemonic_store, sharing
 from hippius_drive.identity import Identity
 from hippius_drive.models import (
+    MAX_BATCH_DELETE,
+    MAX_FOLDER_ENTRIES_BATCH,
     MAX_LISTING_PAGE_SIZE,
     MIN_SEARCH_QUERY_LENGTH,
     BrowseFolderEntry,
@@ -509,8 +511,14 @@ class ConflictExit(click.ClickException):
 
 
 @main.command()
-@click.argument("local", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("local", type=click.Path(exists=True, path_type=Path))
 @click.argument("remote")
+@click.option(
+    "-r",
+    "--recursive",
+    is_flag=True,
+    help="LOCAL is a directory: upload every file under it to REMOTE/<relative path>.",
+)
 @click.option(
     "--overwrite",
     is_flag=True,
@@ -524,6 +532,7 @@ def put(
     obj: Context,
     local: Path,
     remote: str,
+    recursive: bool,
     overwrite: bool,
     base_revision: str | None,
     revision_seq: int | None,
@@ -534,13 +543,28 @@ def put(
     explicit --base-revision) the upload fails with exit code 3. With it, the
     write is a compare-and-swap on the revision it read, so two writers racing
     on one path cannot clobber each other; the loser exits 3 and can rerun.
+
+    With -r, LOCAL is a directory and REMOTE the directory it lands in ("" for
+    the folder root). Each file follows the rules above; a file that already
+    exists is reported and the rest still upload, then the command exits 3.
+    Symlinks, Windows junctions and other non-regular files are skipped and
+    named on stderr. Empty directories are created. Any other error stops the upload at that
+    file and exits 1; files uploaded before it stay.
     """
-    if overwrite and (base_revision or revision_seq is not None):
+    explicit = base_revision is not None or revision_seq is not None
+    if overwrite and explicit:
         raise click.ClickException("--overwrite looks the revision up; drop --base-revision")
+    if recursive:
+        if explicit:
+            raise click.ClickException("put -r cannot take --base-revision; use --overwrite")
+        _put_tree(obj, local, remote, "replace" if overwrite else "refuse")
+        return
+    if local.is_dir():
+        raise click.ClickException(f"{local} is a directory; pass -r to upload it")
     base = bytes.fromhex(base_revision) if base_revision else None
     with obj.client() as client:
         if overwrite:
-            result, replaced = _overwrite(client, local, remote)
+            result, replaced = _overwrite(client, local, remote, client.files.lookup(remote))
         else:
             result, replaced = _put_once(client, local, remote, base, revision_seq), base
         file_id = client.files.file_id(remote)
@@ -550,16 +574,17 @@ def put(
         click.echo(f"replaced     {'yes' if replaced is not None else 'no, new file'}")
 
 
-def _overwrite(client: Client, local: Path, remote: str) -> tuple[Any, bytes | None]:
+def _overwrite(
+    client: Client, local: Path, remote: str, current: RemoteFileEntry | None
+) -> tuple[Any, bytes | None]:
     """Replace ``remote`` by compare-and-swap; returns the result and the replaced revision.
 
-    The base is the revision the listing shows. A path whose row the listing
+    The base is ``current``, the row a listing showed at that path. A path whose row the listing
     does not show (no stored path) or that someone created since answers the
     create with a 409 naming its current revision; that revision is quoted
     once more, still as a compare-and-swap. Anything after that is a race the
     caller has to look at.
     """
-    current = client.files.lookup(remote)
     base, seq = None, None
     if current is not None:
         if current.file_id != client.files.file_id(remote):
@@ -627,11 +652,513 @@ def mkdir(obj: Context, paths: tuple[str, ...]) -> None:
 
 
 @main.command()
-@click.argument("target")
-@click.argument("dest", type=click.Path(dir_okay=False, path_type=Path))
+@click.argument("local", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("remote")
+@click.option(
+    "--delete",
+    is_flag=True,
+    help="Also delete remote files under REMOTE that are not in LOCAL. There is no undo.",
+)
 @click.pass_obj
-def get(obj: Context, target: str, dest: Path) -> None:
-    """Download and decrypt TARGET, a relative path or a 64-char file id."""
+def sync(obj: Context, local: Path, remote: str, delete: bool) -> None:
+    """Make the directory REMOTE ("" for the root) match the local directory LOCAL.
+
+    One way, local to remote. A file missing remotely is uploaded; one whose
+    content differs (by the salted content hash the listing carries) replaces
+    the remote copy by compare-and-swap; an identical one is left alone.
+    Remote files are never deleted unless --delete is given. A remote change
+    made since the last sync is replaced by the local copy, not merged: keep
+    a folder edited in two places in sync with the desktop app instead.
+
+    A file someone writes or edits between the listing and the write is left
+    alone: it is reported, the rest continue, and the command exits 3.
+    Symlinks and junctions are skipped (and with --delete, the remote files
+    at their paths are kept), empty directories are created, and any other
+    error stops at that file with exit 1.
+    """
+    prefix = _tree_prefix(remote)
+    tree = _walk_tree(local, prefix)
+    with obj.client() as client:
+        listing = _list_remote(client, prefix)
+        tally = _upload_tree(client, tree, listing, "replace_changed")
+        if delete:
+            _delete_missing(client, tree, listing, tally)
+    _finish_tree(tally)
+
+
+ExistingRemote = Literal["refuse", "replace", "replace_changed"]
+"""What a tree upload does with a file that is already listed at its path.
+
+``refuse``: report it and upload nothing (``put -r``). ``replace``: replace it
+by compare-and-swap (``put -r --overwrite``). ``replace_changed``: replace it
+only when the content differs (``sync``).
+"""
+
+
+@dataclass(frozen=True)
+class _Tree:
+    """A local directory as a tree upload sees it. Every remote path is valid and unique.
+
+    Attributes:
+        files: Each regular file and the remote path it goes to, in walk order.
+        empty_dirs: Remote paths of directories with nothing to upload below them.
+        skipped: Symlinks, junctions and other non-regular entries, with the
+            remote path each would have had.
+    """
+
+    files: list[tuple[Path, str]]
+    empty_dirs: list[str]
+    skipped: list[tuple[Path, str]]
+
+
+@dataclass(frozen=True)
+class _Listing:
+    """The remote side of a tree command, from one ``/get_state`` walk.
+
+    Attributes:
+        by_id: Every file in the folder by ``file_id``, including rows with no
+            stored path, which only an id can place.
+        by_path: Files under the prefix by NFC path. Where the desktop app also
+            stored a path under an NFD id, the row whose id this SDK computes
+            wins, as in ``lookup``.
+    """
+
+    by_id: dict[str, RemoteFileEntry]
+    by_path: dict[str, RemoteFileEntry]
+
+
+@dataclass
+class _Tally:
+    """What a tree command did, for the summary line and the exit code."""
+
+    total: int = 0
+    uploaded: int = 0
+    replaced: int = 0
+    unchanged: int = 0
+    deleted: int = 0
+    refused: int = 0
+    failed: int = 0
+
+
+def _tree_prefix(remote: str) -> str:
+    """The remote directory a tree goes under, without a trailing slash; "" is the root."""
+    return hashes.validate_stored_path(remote.removesuffix("/")) if remote else ""
+
+
+def _remote_path(prefix: str, relative: str) -> str:
+    return f"{prefix}/{relative}" if prefix else relative
+
+
+def _raise(exc: OSError) -> None:
+    raise click.ClickException(f"cannot read {exc.filename}: {exc.strerror}") from exc
+
+
+def _walk_tree(root: Path, prefix: str) -> _Tree:
+    """List what uploading ``root`` to ``prefix`` means; refuse names that cannot be stored.
+
+    Symlinks and Windows junctions are skipped rather than followed:
+    following one can leave the tree, upload a file twice under two names, or
+    loop. A directory whose only content was skipped counts as empty. Only
+    directories with nothing below them are listed as empty: the server shows
+    ``a`` once ``a/b`` exists.
+    """
+    tree = _Tree(files=[], empty_dirs=[], skipped=[])
+    # os.walk swallows a directory it cannot list unless told otherwise.
+    for here, dirnames, filenames in os.walk(root, onerror=_raise):
+        base = Path(here)
+        skipped = [base / n for n in dirnames + filenames if not _is_plain(base / n)]
+        tree.skipped.extend((path, _target(root, prefix, path)) for path in sorted(skipped))
+        dirnames[:] = sorted(n for n in dirnames if base / n not in skipped)
+        kept = [base / n for n in sorted(filenames) if base / n not in skipped]
+        tree.files.extend((path, _target(root, prefix, path)) for path in kept)
+        if not dirnames and not kept and (base != root or prefix):
+            tree.empty_dirs.append(_target(root, prefix, base))
+    _check_targets(tree)
+    return tree
+
+
+def _is_plain(path: Path) -> bool:
+    """True for a real directory or regular file, never for a symlink or junction to one."""
+    if path.is_symlink() or _is_junction(path):
+        return False
+    return path.is_dir() or path.is_file()
+
+
+def _is_junction(path: Path) -> bool:
+    """True for a Windows directory junction, which ``is_symlink`` does not report.
+
+    A junction leads out of the tree or into a loop exactly as a symlink does,
+    and needs no privilege to create. This is the check ``os.path.isjunction``
+    makes on Python 3.12+, written out for 3.10 and 3.11.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        tag = os.lstat(path).st_reparse_tag
+    except OSError:
+        # Gone since the walk listed it: is_dir and is_file then say False too,
+        # so it is skipped, as is_symlink would have it.
+        return False
+    return tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+
+
+def _target(root: Path, prefix: str, path: Path) -> str:
+    """The remote path for ``path`` under ``root``; ``prefix`` itself for ``root``."""
+    relative = path.relative_to(root).as_posix()
+    return prefix if relative == "." else _remote_path(prefix, relative)
+
+
+def _check_targets(tree: _Tree) -> None:
+    """Refuse the tree if a remote path is invalid, or two local names share one.
+
+    Done before any request, so a bad name deep in the tree cannot stop the
+    upload halfway. Two names can share a path when they differ only in
+    Unicode normalisation, which the server stores as NFC.
+    """
+    seen: dict[str, Path] = {}
+    for local, remote in [*tree.files, *((Path(d), d) for d in tree.empty_dirs)]:
+        try:
+            path = hashes.validate_stored_path(remote)
+        except ValueError as exc:
+            raise click.ClickException(f"{local} cannot be stored: {exc}; rename it") from exc
+        if path in seen:
+            raise click.ClickException(f"{seen[path]} and {local} both map to {path}; rename one")
+        seen[path] = local
+
+
+def _list_remote(client: Client, prefix: str) -> _Listing:
+    under = f"{prefix}/" if prefix else ""
+    listing = _Listing(by_id={}, by_path={})
+    for entry in client.files.iter_state():
+        listing.by_id[entry.file_id] = entry
+        if entry.relative_path is None:
+            continue
+        path = unicodedata.normalize("NFC", entry.relative_path)
+        if path.startswith(under) and (
+            path not in listing.by_path or entry.file_id == client.files.file_id(path)
+        ):
+            listing.by_path[path] = entry
+    return listing
+
+
+def _put_tree(obj: Context, local: Path, remote: str, existing: ExistingRemote) -> None:
+    if not local.is_dir():
+        raise click.ClickException(f"put -r takes a directory; {local} is a file")
+    prefix = _tree_prefix(remote)
+    tree = _walk_tree(local, prefix)
+    with obj.client() as client:
+        tally = _upload_tree(client, tree, _list_remote(client, prefix), existing)
+    _finish_tree(tally)
+
+
+def _upload_tree(
+    client: Client, tree: _Tree, listing: _Listing, existing: ExistingRemote
+) -> _Tally:
+    """Upload every file in ``tree``, then create its empty directories.
+
+    A refusal is about one file, so it is reported and the walk goes on. Any
+    other failure (auth, quota, network after the transport's own retries) is
+    about every file still to go, so it propagates and stops the walk.
+    """
+    for path, _ in tree.skipped:
+        click.echo(f"skipped   {path} (not a regular file or directory)", err=True)
+    tally = _Tally(total=len(tree.files))
+    for local, remote in tree.files:
+        # By id first: it also places rows with no stored path. By path second:
+        # a desktop row stored under an NFD id.
+        current = listing.by_id.get(client.files.file_id(remote)) or listing.by_path.get(
+            hashes.normalize_relative_path(remote)
+        )
+        try:
+            outcome = _upload_entry(client, local, remote, current, existing)
+        except ConflictExit as exc:
+            click.echo(f"refused   {exc.message}", err=True)
+            tally.refused += 1
+            continue
+        click.echo(f"{outcome:<9} {remote}")
+        tally.uploaded += outcome == "put"
+        tally.replaced += outcome == "replaced"
+        tally.unchanged += outcome == "unchanged"
+    for start in range(0, len(tree.empty_dirs), MAX_FOLDER_ENTRIES_BATCH):
+        client.folders.make_dirs(tree.empty_dirs[start : start + MAX_FOLDER_ENTRIES_BATCH])
+    return tally
+
+
+def _upload_entry(
+    client: Client,
+    local: Path,
+    remote: str,
+    current: RemoteFileEntry | None,
+    existing: ExistingRemote,
+) -> str:
+    """Upload one file of a tree; returns ``put``, ``replaced`` or ``unchanged``.
+
+    Raises:
+        ConflictExit: For a refusal that is about this file only.
+    """
+    if current is None:
+        _create(client, local, remote, existing)
+        return "put"
+    if existing == "refuse":
+        raise ConflictExit(f"{remote} already exists; pass --overwrite to replace it")
+    if existing == "replace_changed" and _same_content(client, local, current):
+        return "unchanged"
+    if current.file_id != client.files.file_id(remote):
+        raise ConflictExit(
+            f"{remote} was stored by the desktop app under another id (an NFD name); "
+            "replace it there, or rm it first"
+        )
+    _overwrite(client, local, remote, current)
+    return "replaced"
+
+
+def _create(client: Client, local: Path, remote: str, existing: ExistingRemote) -> None:
+    """Upload a file the listing did not show; never replaces one that appeared since.
+
+    Unlike ``put --overwrite``, a 409 is not retried with the revision it
+    names: the listing is the whole remote state the tree was compared with,
+    so a file created after it has never been compared and is not ours to
+    replace.
+    """
+    try:
+        client.files.put(local, remote)
+    except errors.Conflict as exc:
+        if existing != "refuse" and _names_a_revision(exc):
+            message = f"{remote} was created since it was listed; rerun to compare it"
+            raise ConflictExit(message) from exc
+        raise ConflictExit(_conflict_message(remote, exc, replacing=False)) from exc
+
+
+def _same_content(client: Client, local: Path, current: RemoteFileEntry) -> bool:
+    """True when ``local`` hashes to the listed ``salted_hash``, which salts with the account."""
+    if local.stat().st_size != current.size_bytes:
+        return False
+    hasher = hashes.salted_hasher(client.identity.account_ss58)
+    hasher.update_mmap(local)
+    return hasher.digest() == current.salted_hash
+
+
+def _delete_missing(client: Client, tree: _Tree, listing: _Listing, tally: _Tally) -> None:
+    """Delete listed files under the prefix that have no local file, by compare-and-swap.
+
+    Each delete quotes the revision the listing showed, so a file someone
+    edited after the listing stays and is reported. Remote files at or under
+    a skipped local path are kept: the local side has something there.
+    """
+    present = {hashes.normalize_relative_path(remote) for _, remote in tree.files}
+    kept = [remote for _, remote in tree.skipped]
+    gone = {
+        entry.file_id: path
+        for path, entry in listing.by_path.items()
+        if path not in present and not any(path == k or path.startswith(f"{k}/") for k in kept)
+    }
+    ids = list(gone)
+    for start in range(0, len(ids), MAX_BATCH_DELETE):
+        batch = ids[start : start + MAX_BATCH_DELETE]
+        expected = {file_id: listing.by_id[file_id].revision_id for file_id in batch}
+        result = client.files.delete_many(batch, expected_revisions=expected)
+        for done in result.deleted:
+            click.echo(f"deleted   {gone.get(done.file_id, done.file_id)}")
+        tally.deleted += result.files_deleted
+        for failure in result.errors:
+            path = gone.get(failure.file_id, failure.file_id)
+            if failure.code == "conflict":
+                click.echo(f"refused   {path} changed since it was listed; not deleted", err=True)
+                tally.refused += 1
+            else:
+                click.echo(f"failed    {path}  {failure.code}: {failure.message}", err=True)
+                tally.failed += 1
+
+
+def _finish_tree(tally: _Tally) -> None:
+    click.echo(
+        f"uploaded {tally.uploaded}, replaced {tally.replaced}, unchanged {tally.unchanged}, "
+        f"deleted {tally.deleted}, refused {tally.refused}, failed {tally.failed}"
+    )
+    if tally.failed:
+        raise click.ClickException(f"{tally.failed} deletes failed; see the lines above")
+    if tally.refused:
+        raise ConflictExit(f"{tally.refused} files were left as they are; see the lines above")
+
+
+def _get_tree(client: Client, target: str, dest: Path) -> None:
+    """Download every listed file under ``target`` into ``dest``, keeping relative paths."""
+    prefix = _tree_prefix(target)
+    if dest.exists() and not dest.is_dir():
+        raise click.ClickException(f"{dest} is a file; get -r writes into a directory")
+    listed = _list_remote(client, prefix).by_path
+    if not listed:
+        raise click.ClickException(f"no files under {prefix or 'the folder root'}")
+    root = dest.resolve()
+    refused = _unwritable(listed, prefix)
+    for path in sorted(refused):
+        click.echo(f"refused   {path} {refused[path]}", err=True)
+    for path, entry in sorted(listed.items()):
+        if path in refused:
+            continue
+        out = _inside(root, _below(prefix, path))
+        try:
+            client.files.get(entry.file_id, out)
+        except OSError as exc:
+            # A local directory where a file goes, or a disk that refuses a
+            # name the checks above let through.
+            raise click.ClickException(f"cannot write {out}: {exc.strerror}") from exc
+        click.echo(f"wrote     {out}")
+    click.echo(f"downloaded {len(listed) - len(refused)}, refused {len(refused)}")
+    if refused:
+        raise ConflictExit(f"{len(refused)} files were not downloaded; see the lines above")
+
+
+def _below(prefix: str, path: str) -> str:
+    """``path`` relative to the directory ``prefix`` ("" for the root)."""
+    return path[len(prefix) + 1 :] if prefix else path
+
+
+def _unwritable(paths: Iterable[str], prefix: str) -> dict[str, str]:
+    """Each listed path ``get -r`` must not write on this platform, with the reason.
+
+    Checked before any download, so a bad name is reported per file and the
+    rest still download, instead of stopping the command partway with exit 1.
+    A path refused for one reason is not reported again for another.
+    """
+    paths = sorted(paths)
+    refused: dict[str, str] = {}
+    for path in paths:
+        reason = _windows_unsafe(_below(prefix, path))
+        if reason is not None:
+            refused[path] = f"{reason}; mv it to download it"
+    for path, group in _local_clashes(paths).items():
+        others = ", ".join(p for p in group if p != path)
+        refused.setdefault(path, f"is one local file with {others}; mv one to download it")
+    # Only files that will be written make a local directory.
+    written = [path for path in paths if path not in refused]
+    for path, child in _file_dir_clashes(written).items():
+        refused[path] = f"is a local directory for {child}; mv one to download it"
+    return refused
+
+
+# Reserved device names: a file named one of these, with any extension, opens
+# the device. Source: "Naming Files, Paths, and Namespaces" (Win32 docs,
+# learn.microsoft.com/windows/win32/fileio/naming-a-file), which also lists
+# the superscript-digit forms.
+_WINDOWS_RESERVED = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"{port}{n}" for port in ("COM", "LPT") for n in "0123456789\u00b9\u00b2\u00b3"]
+)
+# Characters the same page forbids in a name. ``\`` and control characters
+# never reach here: the server's path validator refuses them.
+_WINDOWS_FORBIDDEN = frozenset('<>:"|?*')
+
+
+def _windows_unsafe(relative: str) -> str | None:
+    """Why ``relative`` cannot be written under its own name on Windows, or None.
+
+    A colon is the worst case: ``a:b`` opens the alternate data stream ``b``
+    of the file ``a``, so the content is hidden and ``a`` may be replaced.
+    """
+    if sys.platform != "win32":
+        return None
+    for segment in relative.split("/"):
+        forbidden = "".join(sorted(_WINDOWS_FORBIDDEN.intersection(segment)))
+        if forbidden:
+            return f"has {forbidden!r}, which a Windows file name cannot hold"
+        if not segment.rstrip(". "):
+            return f"has {segment!r}, which Windows reads as no name"
+        if segment.split(".")[0].rstrip(" ").upper() in _WINDOWS_RESERVED:
+            return f"has {segment!r}, a reserved Windows device name"
+    return None
+
+
+def _file_dir_clashes(paths: Iterable[str]) -> dict[str, str]:
+    """Map each file whose local name is also a directory of another file to one such file.
+
+    Remote ``a`` next to ``a/b`` (or ``A`` next to ``a/b`` where the disk folds
+    case) cannot both exist locally. Only the file is refused: the directory
+    may hold many files, and the refusal names the clash so nothing is lost
+    silently.
+    """
+    paths = list(paths)
+    dirs: dict[str, str] = {}
+    for path in paths:
+        segments = path.split("/")
+        for depth in range(1, len(segments)):
+            dirs.setdefault(_local_name("/".join(segments[:depth])), path)
+    return {path: dirs[_local_name(path)] for path in paths if _local_name(path) in dirs}
+
+
+def _local_clashes(paths: Iterable[str]) -> dict[str, list[str]]:
+    """Map each remote path that shares a local file with another to all paths sharing it.
+
+    Remote paths are case-sensitive, so ``A.txt`` and ``a.txt`` can both
+    exist. The default macOS and Windows disks fold case, and Windows also
+    drops trailing dots and spaces (``x.`` is ``x``), so writing both would
+    leave one file holding whichever came last. None of a clashing group is
+    written: picking one would be a silent guess. ``mv`` on one of the
+    remote files fixes it.
+
+    The platform decides, not the destination disk: probing it would mean a
+    test write. So a case-sensitive macOS volume gets a refusal it did not
+    need, and a case-folding disk mounted on Linux gets no check.
+    ``casefold`` also folds a little more than APFS or NTFS (``ß`` and
+    ``ss``); that errs toward a refusal rather than a lost file. APFS also
+    ignores Unicode normalisation, but the listing keys are NFC already.
+    """
+    groups: dict[str, list[str]] = {}
+    for path in sorted(paths):
+        groups.setdefault(_local_name(path), []).append(path)
+    return {path: group for group in groups.values() if len(group) > 1 for path in group}
+
+
+def _local_name(path: str) -> str:
+    """``path`` as the default disk of this platform compares names."""
+    if sys.platform == "win32":
+        path = "/".join(part.rstrip(". ") for part in path.split("/"))
+    if sys.platform in ("darwin", "win32"):
+        return path.casefold()
+    return path
+
+
+def _inside(root: Path, relative: str) -> Path:
+    """``root / relative``, refused unless it resolves inside ``root``.
+
+    A listed path comes from whoever wrote the row, which in a shared drive is
+    any member. The server validates paths, but a name that is safe on the
+    server (``C:/x`` on Windows, or a local symlink already under ``root``)
+    can still point elsewhere once joined to a local path.
+    """
+    out = (root / relative).resolve()
+    if not out.is_relative_to(root) or out == root:
+        raise click.ClickException(f"refusing to write {relative!r}: it lands outside {root}")
+    return out
+
+
+@main.command()
+@click.argument("target")
+@click.argument("dest", type=click.Path(path_type=Path))
+@click.option(
+    "-r",
+    "--recursive",
+    is_flag=True,
+    help='TARGET is a directory ("" for the root): download every file under it into DEST.',
+)
+@click.pass_obj
+def get(obj: Context, target: str, dest: Path, recursive: bool) -> None:
+    """Download and decrypt TARGET, a relative path or a 64-char file id.
+
+    With -r, every listed file under the directory TARGET is written to
+    DEST/<path below TARGET>, replacing local files of the same name. Empty
+    directories are not recreated. Remote files whose names this disk treats
+    as one (A.txt and a.txt on macOS and Windows), a file that is also a
+    directory (a next to a/b), and on Windows a name it cannot hold (a:b,
+    CON) are reported and not written; the rest are, and the command exits
+    3. Any other error stops the download.
+    """
+    if recursive:
+        with obj.client() as client:
+            _get_tree(client, target, dest)
+        return
+    if dest.is_dir():
+        raise click.ClickException(f"{dest} is a directory; give the file path to write")
     with obj.client() as client:
         info = client.files.get(_as_file_id(client, target), dest)
     click.echo(f"wrote {dest} ({info.size_bytes} bytes)")
@@ -649,7 +1176,7 @@ def rm(obj: Context, targets: tuple[str, ...]) -> None:
             return
         result = client.files.delete_many(ids)
         for failure in result.errors:
-            click.echo(f"failed  {failure.file_id}  {failure.error}", err=True)
+            click.echo(f"failed  {failure.file_id}  {failure.code}: {failure.message}", err=True)
         if result.errors:
             raise click.ClickException(
                 f"deleted {result.files_deleted}, {len(result.errors)} failed"

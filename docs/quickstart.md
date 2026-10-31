@@ -218,9 +218,11 @@ and raises `ValueError` naming the flag when it is off.
 
 ## Sharing a folder
 
-A folder share does not upload anything. The fragment is this drive's file key,
-so anyone holding the link can decrypt the files the token's prefix allows the
-server to serve.
+A folder share does not upload anything. The fragment is a fresh link secret
+(`#s=`, or `#sp=` with a password); the server keeps this drive's file key
+sealed under it and hands it to whoever opens the link. That person can then
+decrypt the files the token's prefix allows the server to serve. The console
+opens these links, and so do `folder_shares.browse` and `folder_shares.get`.
 
 ```python
 from hippius_drive import FolderShareSpec

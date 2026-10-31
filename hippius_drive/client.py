@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import unicodedata
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
 from types import TracebackType
@@ -559,7 +559,13 @@ class FileOps:
         """
         return self._client.run(_ops.delete_file(self._client.identity, file_id))
 
-    def delete_many(self, file_ids: list[str], quiet: bool = False) -> models.BatchDeleteResult:
+    def delete_many(
+        self,
+        file_ids: list[str],
+        quiet: bool = False,
+        *,
+        expected_revisions: Mapping[str, bytes] | None = None,
+    ) -> models.BatchDeleteResult:
         """Remove up to 1000 files in one transaction.
 
         The server answers 200 even when individual ids fail, so inspect
@@ -568,6 +574,10 @@ class FileOps:
         Args:
             file_ids: Hex path hashes to remove.
             quiet: Omit successful entries from the response.
+            expected_revisions: ``file_id`` to the ``revision_id`` you listed.
+                A file that has moved past it is left in place and reported in
+                ``errors`` with code ``conflict``; ids not in the map delete
+                unconditionally.
 
         Returns:
             The result.
@@ -575,7 +585,8 @@ class FileOps:
         Raises:
             ValueError: If the batch exceeds the server cap of 1000.
         """
-        return self._client.run(_ops.delete_files(self._client.identity, file_ids, quiet))
+        request = _ops.delete_files(self._client.identity, file_ids, quiet, expected_revisions)
+        return self._client.run(request)
 
     def rename(self, renames: list[RenameSpec]) -> models.BatchRenameResult:
         """Re-key files without re-uploading ciphertext, under one signature.
@@ -1062,18 +1073,24 @@ class AsyncFileOps:
         return await self._client.run(_ops.delete_file(self._client.identity, file_id))
 
     async def delete_many(
-        self, file_ids: list[str], quiet: bool = False
+        self,
+        file_ids: list[str],
+        quiet: bool = False,
+        *,
+        expected_revisions: Mapping[str, bytes] | None = None,
     ) -> models.BatchDeleteResult:
         """Remove up to 1000 files in one transaction.
 
         Args:
             file_ids: Hex path hashes to remove.
             quiet: Omit successful entries from the response.
+            expected_revisions: Same as :meth:`FileOps.delete_many`.
 
         Returns:
             The result.
         """
-        return await self._client.run(_ops.delete_files(self._client.identity, file_ids, quiet))
+        request = _ops.delete_files(self._client.identity, file_ids, quiet, expected_revisions)
+        return await self._client.run(request)
 
     async def rename(self, renames: list[RenameSpec]) -> models.BatchRenameResult:
         """Re-key files without re-uploading ciphertext, under one signature.
