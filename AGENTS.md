@@ -264,7 +264,7 @@ uv run pytest                 # unit/property/respx; coverage floor 98%; skips e
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check
-uv run pip-audit
+uv run pip-audit               # Python 3.11+ only; CI audits on 3.13
 uv run pytest -m e2e --no-cov # live; needs HIPPIUS_TEST_TOKEN,
                               # HIPPIUS_TEST_ACCOUNT_SS58, HIPPIUS_TEST_MNEMONIC
 ```
