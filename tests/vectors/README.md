@@ -55,3 +55,11 @@ rename_text      pairs[] (old_hex, new_hex), text
 Changing any pinned value is a breaking change to stored data: a new folder
 mnemonic orphans every folder already registered under the old derivation.
 Bump `version`, rename the file, and update both repos in the same change.
+
+## Share comment vectors
+
+`share-comments-vectors.json` comes from the console, not hcfs: it is
+`src/lib/files/share/insights/share-comments-vectors.json` in
+thenervelab/hippius-console (copied at `ebae2d8`, branch `dev`), the file the
+console and the desktop app replay for the share-link comment scheme. Copy it
+here verbatim when it changes; `tests/crypto/test_comments.py` replays it.
