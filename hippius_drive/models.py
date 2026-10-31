@@ -44,6 +44,12 @@ a walk must advance by the rows a page actually returned, never by the limit
 it asked for. ``/get_state`` is a separate, larger cap (5000).
 """
 
+MAX_BATCH_DELETE = 1000
+"""Server cap on ``/delete_files`` (``MAX_BATCH_DELETE_FILES``)."""
+
+MAX_FOLDER_ENTRIES_BATCH = 500
+"""Directory paths one ``/register_folder_entries`` request may carry."""
+
 MIN_SEARCH_QUERY_LENGTH = 3
 """Shortest ``q``, after trimming, that ``/search_files`` will match on.
 

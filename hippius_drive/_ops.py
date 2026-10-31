@@ -18,12 +18,14 @@ from hippius_drive._upload import TRANSPORT_CHUNK, PreparedUpload
 from hippius_drive._wire import Request, build
 from hippius_drive.crypto import hashes, kdf
 from hippius_drive.identity import Identity, rename_text
-from hippius_drive.models import BrowseOptions, SearchFilters
+from hippius_drive.models import (
+    MAX_BATCH_DELETE,
+    MAX_FOLDER_ENTRIES_BATCH,
+    BrowseOptions,
+    SearchFilters,
+)
 
 T = TypeVar("T")
-
-MAX_BATCH_DELETE = 1000
-"""Server cap on ``/delete_files`` (``MAX_BATCH_DELETE_FILES``)."""
 
 
 @dataclass(frozen=True)
@@ -135,10 +137,6 @@ def health() -> Op[models.HealthResult]:
         The operation.
     """
     return Op(build.health(), _parser(models.HealthResult))
-
-
-MAX_FOLDER_ENTRIES_BATCH = 500
-"""Directory paths one ``/register_folder_entries`` request may carry."""
 
 
 def register_folder_entries(
