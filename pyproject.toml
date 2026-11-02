@@ -13,19 +13,21 @@ requires-python = ">=3.10"
 authors = [{ name = "The Nerve Lab" }]
 keywords = ["hippius", "hcfs", "storage", "encryption", "e2ee"]
 dependencies = [
-  "httpx==0.28.1",
-  "pynacl==1.6.2",
-  "blake3==1.0.9",
-  "mnemonic==0.21",
-  "cryptography==50.0.1",
-  "argon2-cffi==25.1.0",
-  "pydantic==2.13.5",
-  "click==8.5.0",
-  "tomli==2.4.1; python_version < '3.11'",
+  "httpx>=0.28.1",
+  "pynacl>=1.6.2",
+  "blake3>=1.0.9",
+  "mnemonic>=0.21",
+  "cryptography>=50.0.1",
+  "argon2-cffi>=25.1.0",
+  "pydantic>=2.13.5",
+  "click>=8.5.0",
+  "tomli>=2.4.1; python_version < '3.11'",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
+  "Environment :: Console",
   "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -39,15 +41,16 @@ classifiers = [
 # Access-key login (sr25519 + secp256k1). Native wheels; kept out of the core
 # install so file storage does not pull a Rust or C extension it never uses.
 login = [
-  "py-sr25519-bindings==0.2.4",
-  "coincurve==21.0.0",
-  "pycryptodome==4.1.0",
+  "py-sr25519-bindings>=0.2.4",
+  "coincurve>=21.0.0",
+  "pycryptodome>=4.1.0",
 ]
 
 [project.scripts]
 hippius-drive = "hippius_drive.cli:run"
 
 [project.urls]
+Documentation = "https://github.com/thenervelab/hippius-drive-sdk/blob/main/docs/quickstart.md"
 Source = "https://github.com/thenervelab/hippius-drive-sdk"
 Issues = "https://github.com/thenervelab/hippius-drive-sdk/issues"
 

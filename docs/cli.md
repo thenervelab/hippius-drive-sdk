@@ -58,7 +58,7 @@ itself: the console uses it as that account's Drive phrase too.
 ## Signing in without a browser
 
 ```bash
-pip install "hippius-drive[login] @ git+https://github.com/thenervelab/hippius-drive-sdk"
+pip install "hippius-drive[login]"
 hippius-drive auth login --phrase-file ~/.secrets/access-key   # or: --phrase-file - < file
 hippius-drive auth login                                       # unlock the encrypted mnemonic file
 hippius-drive auth login --phrase-file - --token-file ~/.secrets/hippius-token
